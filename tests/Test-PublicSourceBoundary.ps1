@@ -19,7 +19,18 @@ $publicEntries = @(Get-PublicSourceEntries -RepositoryRoot $repositoryRoot)
 Assert-PublicFileSystemEntriesAllowed -RepositoryRoot $repositoryRoot -Entries @($rootEntry)
 Assert-PublicFileSystemEntriesAllowed -RepositoryRoot $repositoryRoot -Entries $publicEntries
 
-$trackedFiles = @(& git -C $repositoryRoot ls-files)
-Assert-PublicTrackedPathsAllowed -RelativePaths $trackedFiles
+$trackedEntries = @(
+    foreach ($line in @(& git -c core.quotepath=false -C $repositoryRoot ls-files --stage)) {
+        if ($line -notmatch '^(?<mode>\d{6}) [0-9a-f]+ \d+\t(?<path>.+)$') {
+            throw "Unexpected Git index entry: $line"
+        }
 
-"PUBLIC SOURCE BOUNDARY PASSED: scanned $($publicEntries.Count) file-system entries and $($trackedFiles.Count) tracked release paths under $repositoryRoot"
+        [pscustomobject]@{
+            Mode = $Matches.mode
+            Path = $Matches.path
+        }
+    }
+)
+Assert-PublicTrackedEntriesAllowed -Entries $trackedEntries
+
+"PUBLIC SOURCE BOUNDARY PASSED: scanned $($publicEntries.Count) file-system entries and $($trackedEntries.Count) tracked release paths under $repositoryRoot"

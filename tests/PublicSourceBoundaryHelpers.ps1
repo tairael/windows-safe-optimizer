@@ -72,6 +72,18 @@ function Assert-PublicTrackedPathsAllowed {
     }
 }
 
+function Assert-PublicTrackedEntriesAllowed {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Entries)
+
+    foreach ($entry in $Entries) {
+        if ([string]$entry.Mode -eq '120000') {
+            throw "Git symbolic links are not allowed in public source: $($entry.Path)"
+        }
+
+        Assert-PublicRelativePathAllowed -RelativePath ([string]$entry.Path) -Source 'Git tracked-path'
+    }
+}
+
 function Get-PublicSourceEntries {
     param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
 

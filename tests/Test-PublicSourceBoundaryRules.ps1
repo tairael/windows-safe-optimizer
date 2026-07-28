@@ -62,4 +62,14 @@ Assert-Throws {
     Assert-PublicFileSystemEntriesAllowed -RepositoryRoot $repositoryRoot -Entries @($reparseEntry)
 } 'File-system scan accepted a reparse point probe'
 
-"PUBLIC SOURCE NEGATIVE MATRIX PASSED: $($blockedCases.Count) blocked patterns checked through 2 scan paths; reparse probe rejected"
+$gitSymlinkEntry = [pscustomobject]@{
+    Path = 'docs/linked-content'
+    Mode = '120000'
+}
+
+Assert-True ($null -ne (Get-Command 'Assert-PublicTrackedEntriesAllowed' -ErrorAction SilentlyContinue)) 'Git tracked-entry boundary helper is missing'
+Assert-Throws {
+    Assert-PublicTrackedEntriesAllowed -Entries @($gitSymlinkEntry)
+} 'Git tracked-path scan accepted a symbolic-link probe'
+
+"PUBLIC SOURCE NEGATIVE MATRIX PASSED: $($blockedCases.Count) blocked patterns checked through 2 scan paths; reparse and Git symlink probes rejected"
