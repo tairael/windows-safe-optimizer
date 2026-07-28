@@ -1,0 +1,6 @@
+.agents/
+node_modules/
+test-output/
+.tmp/
+Thumbs.db
+.DS_Store
