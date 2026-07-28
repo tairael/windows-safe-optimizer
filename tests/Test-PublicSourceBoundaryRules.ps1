@@ -72,4 +72,18 @@ Assert-Throws {
     Assert-PublicTrackedEntriesAllowed -Entries @($gitSymlinkEntry)
 } 'Git tracked-path scan accepted a symbolic-link probe'
 
-"PUBLIC SOURCE NEGATIVE MATRIX PASSED: $($blockedCases.Count) blocked patterns checked through 2 scan paths; reparse and Git symlink probes rejected"
+$gitlinkEntry = [pscustomobject]@{
+    Path = 'skills/external-component'
+    Mode = '160000'
+}
+
+Assert-Throws {
+    Assert-PublicTrackedEntriesAllowed -Entries @($gitlinkEntry)
+} 'Git tracked-path scan accepted a gitlink probe'
+
+Assert-PublicTrackedEntriesAllowed -Entries @(
+    [pscustomobject]@{ Path = 'README.md'; Mode = '100644' },
+    [pscustomobject]@{ Path = 'scripts/check.ps1'; Mode = '100755' }
+)
+
+"PUBLIC SOURCE NEGATIVE MATRIX PASSED: $($blockedCases.Count) blocked patterns checked through 2 scan paths; reparse, symlink, and gitlink probes rejected"
