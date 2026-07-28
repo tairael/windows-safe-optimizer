@@ -12,30 +12,140 @@ function Test-PathStrictlyWithin {
     return $candidate.StartsWith($parentPrefix, [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Assert-TestRunnerPathProbe {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$TemporaryParent,
+        [Parameter(Mandatory = $true)][IO.FileAttributes]$TemporaryParentAttributes,
+        [string]$TargetPath,
+        [IO.FileAttributes]$TargetAttributes = [IO.FileAttributes]::Normal
+    )
+
+    if (-not (Test-PathStrictlyWithin -CandidatePath $TemporaryParent -ParentPath $RepositoryRoot)) {
+        throw "Temporary parent is outside the public repository: $TemporaryParent"
+    }
+    if (($TemporaryParentAttributes -band [IO.FileAttributes]::Directory) -eq 0 -or
+        ($TemporaryParentAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Temporary parent must be a normal directory: $TemporaryParent"
+    }
+
+    if ($PSBoundParameters.ContainsKey('TargetPath')) {
+        if (-not (Test-PathStrictlyWithin -CandidatePath $TargetPath -ParentPath $TemporaryParent)) {
+            throw "Cleanup target is outside the public repository .tmp directory: $TargetPath"
+        }
+        if (($TargetAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Cleanup target cannot be a reparse point: $TargetPath"
+        }
+    }
+}
+
+function Initialize-TestRunnerTemporaryParent {
+    param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
+
+    $repositoryItem = Get-Item -LiteralPath $RepositoryRoot -Force
+    if (-not $repositoryItem.PSIsContainer -or (($repositoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Public repository root must be a normal directory: $RepositoryRoot"
+    }
+
+    $resolvedRepositoryRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $repositoryItem.FullName).ProviderPath).TrimEnd('\', '/')
+    $temporaryParent = [IO.Path]::GetFullPath((Join-Path $resolvedRepositoryRoot '.tmp')).TrimEnd('\', '/')
+    if (-not (Test-PathStrictlyWithin -CandidatePath $temporaryParent -ParentPath $resolvedRepositoryRoot)) {
+        throw "Temporary parent is outside the public repository: $temporaryParent"
+    }
+
+    $created = $false
+    if (-not (Test-Path -LiteralPath $temporaryParent)) {
+        New-Item -ItemType Directory -Path $temporaryParent | Out-Null
+        $created = $true
+    }
+
+    $temporaryParentItem = Get-Item -LiteralPath $temporaryParent -Force
+    $resolvedTemporaryParent = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $temporaryParentItem.FullName).ProviderPath).TrimEnd('\', '/')
+    Assert-TestRunnerPathProbe `
+        -RepositoryRoot $resolvedRepositoryRoot `
+        -TemporaryParent $resolvedTemporaryParent `
+        -TemporaryParentAttributes $temporaryParentItem.Attributes
+
+    return [pscustomobject]@{
+        RepositoryRoot = $resolvedRepositoryRoot
+        Path = $resolvedTemporaryParent
+        Created = $created
+    }
+}
+
+function Confirm-TestRunnerTemporaryParent {
+    param([Parameter(Mandatory = $true)][psobject]$TemporaryParentGuard)
+
+    $repositoryItem = Get-Item -LiteralPath ([string]$TemporaryParentGuard.RepositoryRoot) -Force
+    if (-not $repositoryItem.PSIsContainer -or (($repositoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Public repository root must remain a normal directory: $($TemporaryParentGuard.RepositoryRoot)"
+    }
+
+    $resolvedRepositoryRoot = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $repositoryItem.FullName).ProviderPath).TrimEnd('\', '/')
+    $temporaryParentItem = Get-Item -LiteralPath ([string]$TemporaryParentGuard.Path) -Force
+    $resolvedTemporaryParent = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $temporaryParentItem.FullName).ProviderPath).TrimEnd('\', '/')
+    Assert-TestRunnerPathProbe `
+        -RepositoryRoot $resolvedRepositoryRoot `
+        -TemporaryParent $resolvedTemporaryParent `
+        -TemporaryParentAttributes $temporaryParentItem.Attributes
+
+    if (-not $resolvedRepositoryRoot.Equals([string]$TemporaryParentGuard.RepositoryRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $resolvedTemporaryParent.Equals([string]$TemporaryParentGuard.Path, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Temporary-parent guard paths changed after validation'
+    }
+
+    return $TemporaryParentGuard
+}
+
+function Assert-TestRunnerCleanupTarget {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$TemporaryParentGuard,
+        [Parameter(Mandatory = $true)][string]$TargetPath
+    )
+
+    $confirmedGuard = Confirm-TestRunnerTemporaryParent -TemporaryParentGuard $TemporaryParentGuard
+    $targetItem = Get-Item -LiteralPath $TargetPath -Force
+    $resolvedTarget = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $targetItem.FullName).ProviderPath).TrimEnd('\', '/')
+    Assert-TestRunnerPathProbe `
+        -RepositoryRoot ([string]$confirmedGuard.RepositoryRoot) `
+        -TemporaryParent ([string]$confirmedGuard.Path) `
+        -TemporaryParentAttributes ([IO.FileAttributes]::Directory) `
+        -TargetPath $resolvedTarget `
+        -TargetAttributes $targetItem.Attributes
+
+    return $resolvedTarget
+}
+
+function Remove-TestRunnerTemporaryParentIfOwned {
+    param([Parameter(Mandatory = $true)][psobject]$TemporaryParentGuard)
+
+    if (-not [bool]$TemporaryParentGuard.Created) {
+        return
+    }
+
+    $confirmedGuard = Confirm-TestRunnerTemporaryParent -TemporaryParentGuard $TemporaryParentGuard
+    if (@(Get-ChildItem -LiteralPath ([string]$confirmedGuard.Path) -Force).Count -eq 0) {
+        Remove-Item -LiteralPath ([string]$confirmedGuard.Path) -Force
+    }
+}
+
 function New-TestRunnerSandbox {
     param(
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [psobject]$TemporaryParentGuard,
         [scriptblock]$NameFactory = { "runner-empty-suite-$([guid]::NewGuid().ToString('N'))" },
         [int]$MaximumAttempts = 16
     )
 
-    $normalizedRepositoryRoot = [IO.Path]::GetFullPath($RepositoryRoot).TrimEnd('\', '/')
-    $temporaryParent = [IO.Path]::GetFullPath((Join-Path $normalizedRepositoryRoot '.tmp')).TrimEnd('\', '/')
-    if (-not (Test-PathStrictlyWithin -CandidatePath $temporaryParent -ParentPath $normalizedRepositoryRoot)) {
-        throw "Temporary parent is outside the public repository: $temporaryParent"
-    }
-
-    $temporaryParentCreated = $false
-    if (Test-Path -LiteralPath $temporaryParent) {
-        $temporaryParentItem = Get-Item -LiteralPath $temporaryParent -Force
-        if (-not $temporaryParentItem.PSIsContainer -or (($temporaryParentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-            throw "Temporary parent must be a normal directory: $temporaryParent"
-        }
+    if ($null -eq $TemporaryParentGuard) {
+        $TemporaryParentGuard = Initialize-TestRunnerTemporaryParent -RepositoryRoot $RepositoryRoot
     }
     else {
-        New-Item -ItemType Directory -Path $temporaryParent | Out-Null
-        $temporaryParentCreated = $true
+        [void](Confirm-TestRunnerTemporaryParent -TemporaryParentGuard $TemporaryParentGuard)
     }
+
+    $normalizedRepositoryRoot = [string]$TemporaryParentGuard.RepositoryRoot
+    $temporaryParent = [string]$TemporaryParentGuard.Path
 
     for ($attempt = 0; $attempt -lt $MaximumAttempts; $attempt++) {
         $candidateName = [string](& $NameFactory)
@@ -68,7 +178,8 @@ function New-TestRunnerSandbox {
             Path = $resolvedPath
             RepositoryRoot = $normalizedRepositoryRoot
             TemporaryParent = $temporaryParent
-            TemporaryParentCreated = $temporaryParentCreated
+            TemporaryParentCreated = [bool]$TemporaryParentGuard.Created
+            TemporaryParentGuard = $TemporaryParentGuard
             OwnerMarker = $ownerMarker
             OwnerToken = $ownerToken
         }
@@ -80,31 +191,14 @@ function New-TestRunnerSandbox {
 function Remove-TestRunnerSandbox {
     param([Parameter(Mandatory = $true)][psobject]$Sandbox)
 
-    $repositoryRoot = [IO.Path]::GetFullPath([string]$Sandbox.RepositoryRoot).TrimEnd('\', '/')
-    $expectedTemporaryParent = [IO.Path]::GetFullPath((Join-Path $repositoryRoot '.tmp')).TrimEnd('\', '/')
-    $temporaryParent = [IO.Path]::GetFullPath([string]$Sandbox.TemporaryParent).TrimEnd('\', '/')
-    if (-not $temporaryParent.Equals($expectedTemporaryParent, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Sandbox temporary parent is not the public repository .tmp directory: $temporaryParent"
-    }
-
-    $resolvedTemporaryParent = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $temporaryParent).ProviderPath).TrimEnd('\', '/')
-    $resolvedSandbox = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath ([string]$Sandbox.Path)).ProviderPath).TrimEnd('\', '/')
-    if (-not (Test-PathStrictlyWithin -CandidatePath $resolvedTemporaryParent -ParentPath $repositoryRoot)) {
-        throw "Resolved temporary parent is outside the public repository: $resolvedTemporaryParent"
-    }
-    if (-not (Test-PathStrictlyWithin -CandidatePath $resolvedSandbox -ParentPath $resolvedTemporaryParent)) {
-        throw "Resolved runner sandbox is outside the public repository .tmp directory: $resolvedSandbox"
-    }
-
-    foreach ($path in @($resolvedTemporaryParent, $resolvedSandbox)) {
-        $item = Get-Item -LiteralPath $path -Force
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Refusing to clean a reparse point: $path"
-        }
-    }
+    $resolvedSandbox = Assert-TestRunnerCleanupTarget `
+        -TemporaryParentGuard $Sandbox.TemporaryParentGuard `
+        -TargetPath ([string]$Sandbox.Path)
 
     $expectedMarker = Join-Path $resolvedSandbox '.codex-test-owner'
-    $ownerMarker = [IO.Path]::GetFullPath([string]$Sandbox.OwnerMarker)
+    $ownerMarker = Assert-TestRunnerCleanupTarget `
+        -TemporaryParentGuard $Sandbox.TemporaryParentGuard `
+        -TargetPath ([string]$Sandbox.OwnerMarker)
     if (-not $ownerMarker.Equals($expectedMarker, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Unexpected sandbox ownership marker path: $ownerMarker"
     }
@@ -115,8 +209,9 @@ function Remove-TestRunnerSandbox {
         throw "Sandbox ownership marker does not match this run: $ownerMarker"
     }
 
+    $resolvedSandbox = Assert-TestRunnerCleanupTarget `
+        -TemporaryParentGuard $Sandbox.TemporaryParentGuard `
+        -TargetPath $resolvedSandbox
     Remove-Item -LiteralPath $resolvedSandbox -Recurse -Force
-    if ([bool]$Sandbox.TemporaryParentCreated -and @(Get-ChildItem -LiteralPath $resolvedTemporaryParent -Force).Count -eq 0) {
-        Remove-Item -LiteralPath $resolvedTemporaryParent -Force
-    }
+    Remove-TestRunnerTemporaryParentIfOwned -TemporaryParentGuard $Sandbox.TemporaryParentGuard
 }

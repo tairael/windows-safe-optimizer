@@ -3,8 +3,41 @@ $repositoryRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 . (Join-Path $PSScriptRoot 'TestRunnerSandboxHelpers.ps1')
 
-$temporaryParent = Join-Path $repositoryRoot '.tmp'
-$temporaryParentExisted = Test-Path -LiteralPath $temporaryParent
+$pathProbeCommand = Get-Command 'Assert-TestRunnerPathProbe' -ErrorAction SilentlyContinue
+Assert-True ($null -ne $pathProbeCommand) 'Shared temporary-parent path probe is missing'
+
+$probeTemporaryParent = Join-Path $repositoryRoot '.tmp'
+$sentinelWriteReached = $false
+$prewriteProbeRejected = $false
+try {
+    Assert-TestRunnerPathProbe `
+        -RepositoryRoot $repositoryRoot `
+        -TemporaryParent $probeTemporaryParent `
+        -TemporaryParentAttributes ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)
+    $sentinelWriteReached = $true
+}
+catch {
+    $prewriteProbeRejected = $true
+}
+Assert-True $prewriteProbeRejected 'Pre-write guard accepted a simulated reparse-point .tmp directory'
+Assert-True (-not $sentinelWriteReached) 'Sentinel write stage was reached after temporary-parent validation failed'
+
+$cleanupProbeRejected = $false
+try {
+    Assert-TestRunnerPathProbe `
+        -RepositoryRoot $repositoryRoot `
+        -TemporaryParent $probeTemporaryParent `
+        -TemporaryParentAttributes ([IO.FileAttributes]::Directory) `
+        -TargetPath (Join-Path $probeTemporaryParent 'runner-empty-suite-probe') `
+        -TargetAttributes ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)
+}
+catch {
+    $cleanupProbeRejected = $true
+}
+Assert-True $cleanupProbeRejected 'Cleanup guard accepted a simulated reparse-point target'
+
+$temporaryParentGuard = Initialize-TestRunnerTemporaryParent -RepositoryRoot $repositoryRoot
+$temporaryParent = [string]$temporaryParentGuard.Path
 $sentinelToken = [guid]::NewGuid().ToString('N')
 $sentinelRoot = Join-Path $temporaryParent "runner-empty-suite-$sentinelToken"
 $sentinelFile = Join-Path $sentinelRoot 'sentinel.txt'
@@ -23,7 +56,10 @@ try {
     $candidateNames = [Collections.Generic.Queue[string]]::new()
     $candidateNames.Enqueue((Split-Path -Leaf $sentinelRoot))
     $candidateNames.Enqueue("runner-empty-suite-$([guid]::NewGuid().ToString('N'))")
-    $sandbox = New-TestRunnerSandbox -RepositoryRoot $repositoryRoot -NameFactory { $candidateNames.Dequeue() }
+    $sandbox = New-TestRunnerSandbox `
+        -RepositoryRoot $repositoryRoot `
+        -TemporaryParentGuard $temporaryParentGuard `
+        -NameFactory { $candidateNames.Dequeue() }
     $testRoot = $sandbox.Path
 
     Assert-True ($testRoot -ne $sentinelRoot) 'Sandbox reused the pre-existing sentinel directory'
@@ -50,15 +86,23 @@ finally {
     }
 
     if ($sentinelCreated) {
-        Assert-True (Test-Path -LiteralPath $sentinelFile -PathType Leaf) 'Sandbox cleanup removed the pre-existing sentinel'
-        Assert-Equal $sentinelToken (Get-Content -LiteralPath $sentinelFile -Raw) 'Sandbox cleanup changed the pre-existing sentinel'
-        Remove-Item -LiteralPath $sentinelFile -Force
-        Remove-Item -LiteralPath $sentinelRoot -Force
+        $safeSentinelFile = Assert-TestRunnerCleanupTarget `
+            -TemporaryParentGuard $temporaryParentGuard `
+            -TargetPath $sentinelFile
+        $safeSentinelRoot = Assert-TestRunnerCleanupTarget `
+            -TemporaryParentGuard $temporaryParentGuard `
+            -TargetPath $sentinelRoot
+        Assert-Equal $sentinelToken (Get-Content -LiteralPath $safeSentinelFile -Raw) 'Sandbox cleanup changed the pre-existing sentinel'
+        Remove-Item -LiteralPath $safeSentinelFile -Force
+
+        $safeSentinelRoot = Assert-TestRunnerCleanupTarget `
+            -TemporaryParentGuard $temporaryParentGuard `
+            -TargetPath $safeSentinelRoot
+        Assert-Equal 0 @(Get-ChildItem -LiteralPath $safeSentinelRoot -Force).Count 'Sentinel fixture directory is not empty'
+        Remove-Item -LiteralPath $safeSentinelRoot -Force
     }
 
-    if (-not $temporaryParentExisted -and (Test-Path -LiteralPath $temporaryParent) -and @(Get-ChildItem -LiteralPath $temporaryParent -Force).Count -eq 0) {
-        Remove-Item -LiteralPath $temporaryParent -Force
-    }
+    Remove-TestRunnerTemporaryParentIfOwned -TemporaryParentGuard $temporaryParentGuard
 }
 
 'TEST RUNNER EMPTY-SUITE AND SENTINEL GUARDS PASSED'
