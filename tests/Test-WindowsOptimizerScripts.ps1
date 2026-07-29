@@ -93,7 +93,7 @@ function Get-ScriptAstSafetyViolations {
     $violations = [System.Collections.Generic.List[string]]::new()
     $allowedCommandNames = @(
         'Add-BaselineWarning', 'Assert-BaselineReportTargetIsAbsent', 'Close-BaselineReportHandles',
-        'Collect-WindowsBaseline.ps1', 'ConvertFrom-Json', 'ConvertTo-BaselineMarkdown', 'ConvertTo-Json',
+        'ConvertFrom-Json', 'ConvertTo-BaselineMarkdown', 'ConvertTo-Json',
         'ConvertTo-NormalizedFileSystemPath', 'ForEach-Object', 'Get-CimInstance', 'Get-CollectionContext',
         'Get-IsAdministrator', 'Get-Item', 'Get-ItemProperty', 'Get-MemorySnapshot', 'Get-MpComputerStatus',
         'Get-NetAdapter', 'Get-NetFirewallProfile', 'Get-NetRoute', 'Get-NetworkSnapshot',
@@ -111,8 +111,20 @@ function Get-ScriptAstSafetyViolations {
             $violations.Add('dynamic command')
             continue
         }
-        $leafCommandName = @($commandName -split '[\\/]')[-1]
-        if ($allowedCommandNames -notcontains $leafCommandName) {
+        if ($commandName.IndexOfAny([char[]]@('\', '/')) -ge 0) {
+            $containingFunction = $command
+            while ($null -ne $containingFunction -and -not ($containingFunction -is [Management.Automation.Language.FunctionDefinitionAst])) {
+                $containingFunction = $containingFunction.Parent
+            }
+            $isExactEnvironmentInspectorCall = $commandName -ceq '.\Test-WindowsOptimizerEnvironment.ps1' -and
+                $null -ne $containingFunction -and
+                $containingFunction.Name -eq 'Resolve-ValidatedOutputDirectory'
+            if (-not $isExactEnvironmentInspectorCall) {
+                $violations.Add("qualified or path command outside allowlist: $commandName")
+            }
+            continue
+        }
+        if ($allowedCommandNames -notcontains $commandName) {
             $violations.Add("command outside allowlist: $commandName")
         }
     }
@@ -499,7 +511,10 @@ try {
             [pscustomobject]@{ Source = 'Set-Acl -LiteralPath probe -AclObject $acl'; Description = 'ACL mutation' },
             [pscustomobject]@{ Source = 'Invoke-WebRequest https://example.invalid'; Description = 'network request' },
             [pscustomobject]@{ Source = 'Register-ScheduledTask -TaskName Probe -Action $action'; Description = 'scheduled task registration' },
-            [pscustomobject]@{ Source = "[IO.File]::WriteAllText('probe','content')"; Description = '.NET path write' }
+            [pscustomobject]@{ Source = "[IO.File]::WriteAllText('probe','content')"; Description = '.NET path write' },
+            [pscustomobject]@{ Source = '& C:\evil\Test-WindowsOptimizerEnvironment.ps1'; Description = 'absolute path to allowlisted script name' },
+            [pscustomobject]@{ Source = '& C:\evil\Collect-WindowsBaseline.ps1'; Description = 'absolute path to unused allowlisted script name' },
+            [pscustomobject]@{ Source = 'Contoso.Module\Get-CimInstance -ClassName Win32_OperatingSystem'; Description = 'unapproved module-qualified allowlisted command' }
         )) {
         Assert-AstSafetyProbeRejected -Source $astProbe.Source -Description $astProbe.Description
     }
