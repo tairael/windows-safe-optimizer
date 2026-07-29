@@ -71,15 +71,87 @@ $referenceContracts = @{
     'performance.md' = @('bottleneck', 'power mode', 'temperature', 'Windows Update', 'stop condition')
 }
 $referenceSections = @('## Read first', '## Evidence', '## Candidate classes', '## Preserve', '## Risk upgrades', '## Validation', '## Stop')
+
+function Remove-MarkdownFencedCodeBlocks {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Content
+    )
+
+    return [regex]::Replace(
+        $Content,
+        '(?ms)^[ \t]*(?<fence>```|~~~)[^\r\n]*\r?\n.*?^[ \t]*\k<fence>[ \t]*(?:\r?\n|$)',
+        ''
+    )
+}
+
+function Test-ReferenceSectionContract {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Content
+    )
+
+    $body = Remove-MarkdownFencedCodeBlocks -Content $Content
+    $previousIndex = -1
+    foreach ($section in $referenceSections) {
+        $headingPattern = '(?m)^' + [regex]::Escape($section) + '[ \t]*\r?$'
+        $matches = [regex]::Matches($body, $headingPattern)
+        if ($matches.Count -ne 1) { return $false }
+        if ($matches[0].Index -le $previousIndex) { return $false }
+        $previousIndex = $matches[0].Index
+    }
+    return $true
+}
+
+$duplicateHeadingFixture = @"
+## Read first
+## Evidence
+## Candidate classes
+## Preserve
+## Risk upgrades
+## Validation
+## Stop
+## Read first
+"@
+$wrongOrderFixture = @"
+## Evidence
+## Read first
+## Candidate classes
+## Preserve
+## Risk upgrades
+## Validation
+## Stop
+"@
+$negativeReferenceFixtures = @{
+    'duplicate heading' = $duplicateHeadingFixture
+    'wrong heading order' = $wrongOrderFixture
+}
+$legacyFalseGreens = @($negativeReferenceFixtures.GetEnumerator() | Where-Object {
+    $fixture = $_.Value
+    -not ($referenceSections | Where-Object { -not $fixture.Contains($_) })
+})
+Assert-Equal 2 $legacyFalseGreens.Count 'Negative fixtures must prove that legacy Contains checks accept duplicate and out-of-order headings'
+foreach ($fixture in $negativeReferenceFixtures.GetEnumerator()) {
+    Assert-True (-not (Test-ReferenceSectionContract -Content $fixture.Value)) "Reference section contract accepted negative fixture: $($fixture.Key)"
+}
+$fencedTokenFixture = @'
+Body text without the required phrase.
+
+```text
+logical size
+```
+'@
+$fencedTokenBody = Remove-MarkdownFencedCodeBlocks -Content $fencedTokenFixture
+Assert-True (-not $fencedTokenBody.Contains('logical size')) 'Token checks must ignore fenced code blocks'
+
 foreach ($referenceFile in $referenceContracts.Keys) {
     $referencePath = Join-Path $repositoryRoot "skills\windows-safe-optimizer\references\$referenceFile"
     Assert-True (Test-Path -LiteralPath $referencePath -PathType Leaf) "Missing reference: $referenceFile"
     $reference = Get-Content -Raw -LiteralPath $referencePath
-    foreach ($section in $referenceSections) {
-        Assert-True ($reference.Contains($section)) "Missing reference section in ${referenceFile}: $section"
-    }
+    $referenceBody = Remove-MarkdownFencedCodeBlocks -Content $reference
+    Assert-True (Test-ReferenceSectionContract -Content $reference) "Reference sections must appear exactly once and in order: $referenceFile"
     foreach ($token in $referenceContracts[$referenceFile]) {
-        Assert-True ($reference.Contains($token)) "Missing reference token in ${referenceFile}: $token"
+        Assert-True ($referenceBody.Contains($token)) "Missing reference body token in ${referenceFile}: $token"
     }
 }
 
