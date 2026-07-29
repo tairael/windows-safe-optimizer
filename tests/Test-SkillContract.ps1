@@ -65,6 +65,24 @@ foreach ($referenceFile in $referenceFiles) {
     Assert-True ($routing.Contains("(references/$referenceFile)")) "Reference must be a direct Markdown link: $referenceFile"
 }
 
+$referenceContracts = @{
+    'disk-and-storage.md' = @('logical size', 'volume free space', 'reparse point', 'cloud sync', 'official uninstall')
+    'memory-and-startup.md' = @('available memory', 'commit', 'paging', 'process group', 'pagefile')
+    'performance.md' = @('bottleneck', 'power mode', 'temperature', 'Windows Update', 'stop condition')
+}
+$referenceSections = @('## Read first', '## Evidence', '## Candidate classes', '## Preserve', '## Risk upgrades', '## Validation', '## Stop')
+foreach ($referenceFile in $referenceContracts.Keys) {
+    $referencePath = Join-Path $repositoryRoot "skills\windows-safe-optimizer\references\$referenceFile"
+    Assert-True (Test-Path -LiteralPath $referencePath -PathType Leaf) "Missing reference: $referenceFile"
+    $reference = Get-Content -Raw -LiteralPath $referencePath
+    foreach ($section in $referenceSections) {
+        Assert-True ($reference.Contains($section)) "Missing reference section in ${referenceFile}: $section"
+    }
+    foreach ($token in $referenceContracts[$referenceFile]) {
+        Assert-True ($reference.Contains($token)) "Missing reference token in ${referenceFile}: $token"
+    }
+}
+
 foreach ($baselineRule in @(
     'Start the first substantive response with `Mode:`',
     'Mode: conservative-advice',
