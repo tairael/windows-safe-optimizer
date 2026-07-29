@@ -69,6 +69,9 @@ $referenceContracts = @{
     'disk-and-storage.md' = @('logical size', 'volume free space', 'reparse point', 'cloud sync', 'official uninstall')
     'memory-and-startup.md' = @('available memory', 'commit', 'paging', 'process group', 'pagefile')
     'performance.md' = @('bottleneck', 'power mode', 'temperature', 'Windows Update', 'stop condition')
+    'network-and-proxy.md' = @('DNS', 'TLS', 'HTTP', 'WebSocket', 'SSE', 'VPN', 'proxy credential')
+    'security-and-privacy.md' = @('Defender', 'firewall', 'Windows Update', 'UAC', 'Windows 10 lifecycle')
+    'interface-and-notifications.md' = @('security notification', 'update notification', 'background permission', 'user preference')
 }
 $referenceSections = @('## Read first', '## Evidence', '## Candidate classes', '## Preserve', '## Risk upgrades', '## Validation', '## Stop')
 
