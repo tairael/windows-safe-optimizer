@@ -71,6 +71,115 @@ function Assert-BaselineOutputContainsOnlyReports {
     Assert-Equal 'baseline.json|baseline.md' (@($children.Name | Sort-Object) -join '|') 'Baseline collector wrote unexpected files'
 }
 
+function Assert-BaselineCollectorRejectsExistingReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputDirectory,
+        [Parameter(Mandatory = $true)][string]$ExistingReportName,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $existingReport = Join-Path $OutputDirectory $ExistingReportName
+    $before = Get-Content -Raw -LiteralPath $existingReport
+    $invocation = Invoke-BaselineCollector -OutputDirectory $OutputDirectory -Sections @('System', 'Storage', 'Memory')
+    Assert-True ($invocation.ExitCode -ne 0) "Existing report was overwritten: $Description"
+    Assert-Equal $before (Get-Content -Raw -LiteralPath $existingReport) "Existing report changed: $Description"
+    $otherReportName = if ($ExistingReportName -eq 'baseline.json') { 'baseline.md' } else { 'baseline.json' }
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $OutputDirectory $otherReportName))) "Rejected collection left a partial report: $Description"
+}
+
+function Get-ScriptAstSafetyViolations {
+    param([Parameter(Mandatory = $true)][Management.Automation.Language.Ast]$Ast)
+
+    $violations = [System.Collections.Generic.List[string]]::new()
+    $forbiddenCommandNames = @(
+        'Remove-Item', 'Move-Item', 'Copy-Item', 'New-Item', 'Set-Content', 'Add-Content', 'Clear-Content', 'Out-File',
+        'Set-ItemProperty', 'New-ItemProperty', 'Stop-Service', 'Set-Service',
+        'Disable-ScheduledTask', 'Start-Process', 'reg', 'reg.exe', 'schtasks', 'schtasks.exe', 'cmd', 'cmd.exe',
+        'del', 'erase', 'rd', 'rmdir', 'ri', 'rm', 'mv', 'move'
+    )
+    foreach ($command in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true))) {
+        $commandName = $command.GetCommandName()
+        if ([string]::IsNullOrWhiteSpace($commandName)) {
+            $violations.Add('dynamic command')
+            continue
+        }
+        if ($forbiddenCommandNames -contains $commandName.ToLowerInvariant()) {
+            $violations.Add("prohibited command: $commandName")
+        }
+        if ($commandName.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
+            $violations.Add("native executable: $commandName")
+        }
+        if ($null -ne (Get-Alias -Name $commandName -ErrorAction SilentlyContinue)) {
+            $violations.Add("alias command: $commandName")
+        }
+    }
+
+    foreach ($member in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.MemberExpressionAst] }, $true))) {
+        $memberName = $member.Member.Extent.Text
+        $isDangerousCall = $member.Extent.Text -match '(?i)(::|\.)(Delete|Move|MoveTo|Replace|Copy|CopyTo|SetValue)\('
+        if ($isDangerousCall) {
+            $containingFunction = $member
+            while ($null -ne $containingFunction -and -not ($containingFunction -is [Management.Automation.Language.FunctionDefinitionAst])) {
+                $containingFunction = $containingFunction.Parent
+            }
+            $isExactOwnedCleanup = $memberName -eq 'Delete' -and
+                $null -ne $containingFunction -and
+                $containingFunction.Name -eq 'Remove-NewlyCreatedBaselineReport' -and
+                $member.Extent.Text -eq '[IO.File]::Delete($Path)'
+            if (-not $isExactOwnedCleanup) {
+                $violations.Add("dangerous .NET member call: $memberName")
+            }
+        }
+    }
+
+    return @($violations)
+}
+
+function Assert-NoDynamicOrMutatingBundledScriptAst {
+    param([Parameter(Mandatory = $true)][string[]]$BundledScripts)
+
+    foreach ($bundledScript in $BundledScripts) {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($bundledScript, [ref]$tokens, [ref]$errors)
+        Assert-Equal 0 $errors.Count "Bundled script has parser errors: $bundledScript"
+        $violations = @(Get-ScriptAstSafetyViolations -Ast $ast)
+        Assert-Equal 0 $violations.Count "Bundled script failed AST safety audit: $bundledScript; $($violations -join ', ')"
+
+        if ((Split-Path -Leaf $bundledScript) -eq 'Collect-WindowsBaseline.ps1') {
+            $fileOpenCalls = @($ast.FindAll({
+                        param($node)
+                        $node -is [Management.Automation.Language.MemberExpressionAst] -and
+                        $node.Extent.Text.StartsWith('[IO.File]::Open(', [StringComparison]::Ordinal)
+                    }, $true))
+            Assert-Equal 1 $fileOpenCalls.Count 'Collector must have exactly one no-clobber file-open primitive'
+            Assert-True ($fileOpenCalls[0].Extent.Text.Contains('[IO.FileMode]::CreateNew')) 'Collector file-open primitive is not exclusive CreateNew'
+
+            $reportOpenCommands = @($ast.FindAll({
+                        param($node)
+                        $node -is [Management.Automation.Language.CommandAst] -and
+                        $node.GetCommandName() -eq 'Open-NewBaselineReport'
+                    }, $true))
+            Assert-Equal 2 $reportOpenCommands.Count 'Collector must open exactly two report targets'
+            $reportOpenExtents = @($reportOpenCommands.Extent.Text | Sort-Object)
+            Assert-Equal 'Open-NewBaselineReport -Path $JsonPath|Open-NewBaselineReport -Path $MarkdownPath' ($reportOpenExtents -join '|') 'Collector report opens are not precisely limited to the two validated report paths'
+        }
+    }
+}
+
+function Assert-AstSafetyProbeRejected {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseInput($Source, [ref]$tokens, [ref]$errors)
+    Assert-Equal 0 $errors.Count "AST safety probe did not parse: $Description"
+    Assert-True (@(Get-ScriptAstSafetyViolations -Ast $ast).Count -gt 0) "AST safety probe was not rejected: $Description"
+}
+
 function Get-PathSnapshot {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -82,7 +191,12 @@ function Get-PathSnapshot {
     $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
     $childCount = $null
     if ($item.PSIsContainer) {
-        $childCount = @(Get-ChildItem -LiteralPath $fullPath -Force -ErrorAction Stop).Count
+        try {
+            $childCount = @(Get-ChildItem -LiteralPath $fullPath -Force -ErrorAction Stop).Count
+        }
+        catch [UnauthorizedAccessException] {
+            $childCount = $null
+        }
     }
     return [pscustomobject]@{
         Path = $fullPath
@@ -135,6 +249,7 @@ $temporaryParentGuard = Initialize-TestRunnerTemporaryParent -RepositoryRoot $re
 $sandbox = $null
 $reparsePath = $null
 $ancestorLink = $null
+$reportReparsePath = $null
 try {
     $sandbox = New-TestRunnerSandbox -RepositoryRoot $repositoryRoot -TemporaryParentGuard $temporaryParentGuard
     $testOutput = Join-Path $sandbox.Path 'output'
@@ -162,6 +277,42 @@ try {
     foreach ($field in @('productName', 'displayVersion', 'buildNumber', 'powerShellVersion', 'isAdministrator', 'warnings')) {
         Assert-True ($result.PSObject.Properties.Name -contains $field) "Environment field is missing: $field"
     }
+
+    $documentsDirectory = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) 'Documents'
+    $documentsBefore = Get-PathSnapshot -Path $documentsDirectory
+    $documentsInvocation = Invoke-EnvironmentScript -OutputDirectory $documentsDirectory
+    $documentsAfter = Get-PathSnapshot -Path $documentsDirectory
+    Assert-Equal 0 $documentsInvocation.ExitCode 'A normal user-profile child directory was rejected'
+    Assert-PathSnapshotUnchanged -Before $documentsBefore -After $documentsAfter -Description 'normal user-profile child directory'
+
+    Assert-OutputDirectoryRejectedWithoutMutation -Path (Get-CaseAndTrailingSeparatorVariant -Path (Join-Path $env:windir 'Temp')) -Description 'Windows descendant with case and trailing separator'
+    foreach ($programFilesRoot in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)) {
+        $commonFiles = Join-Path $programFilesRoot 'Common Files'
+        if (Test-Path -LiteralPath $commonFiles -PathType Container) {
+            Assert-OutputDirectoryRejectedWithoutMutation -Path (Get-CaseAndTrailingSeparatorVariant -Path $commonFiles) -Description "Program Files descendant with case and trailing separator: $programFilesRoot"
+        }
+    }
+
+    $ordinaryConflictOutput = Join-Path $sandbox.Path 'ordinary-conflict-output'
+    New-Item -ItemType Directory -Path $ordinaryConflictOutput | Out-Null
+    Set-Content -LiteralPath (Join-Path $ordinaryConflictOutput 'baseline.json') -Value 'ordinary sentinel' -NoNewline
+    Assert-BaselineCollectorRejectsExistingReport -OutputDirectory $ordinaryConflictOutput -ExistingReportName 'baseline.json' -Description 'ordinary baseline.json sentinel'
+
+    $markdownConflictOutput = Join-Path $sandbox.Path 'markdown-conflict-output'
+    New-Item -ItemType Directory -Path $markdownConflictOutput | Out-Null
+    Set-Content -LiteralPath (Join-Path $markdownConflictOutput 'baseline.md') -Value 'markdown sentinel' -NoNewline
+    Assert-BaselineCollectorRejectsExistingReport -OutputDirectory $markdownConflictOutput -ExistingReportName 'baseline.md' -Description 'ordinary baseline.md sentinel'
+
+    $hardLinkOutput = Join-Path $sandbox.Path 'hardlink-conflict-output'
+    New-Item -ItemType Directory -Path $hardLinkOutput | Out-Null
+    $hardLinkTarget = Join-Path $hardLinkOutput 'hardlink-target.json'
+    Set-Content -LiteralPath $hardLinkTarget -Value 'hardlink target sentinel' -NoNewline
+    New-Item -ItemType HardLink -Path (Join-Path $hardLinkOutput 'baseline.json') -Target $hardLinkTarget | Out-Null
+    $hardLinkTargetBefore = Get-Content -Raw -LiteralPath $hardLinkTarget
+    $hardLinkInvocation = Invoke-BaselineCollector -OutputDirectory $hardLinkOutput -Sections @('System', 'Storage', 'Memory')
+    Assert-True ($hardLinkInvocation.ExitCode -ne 0) 'Hard-linked baseline.json was accepted'
+    Assert-Equal $hardLinkTargetBefore (Get-Content -Raw -LiteralPath $hardLinkTarget) 'Hard-link target content changed'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $hardLinkOutput 'baseline.md'))) 'Hard-link rejection left a partial report'
 
     $baselineOutput = Join-Path $sandbox.Path 'baseline-output'
     New-Item -ItemType Directory -Path $baselineOutput | Out-Null
@@ -191,25 +342,43 @@ try {
     Assert-CaseInsensitiveNotContains -Text $baselineMarkdown -Value $env:USERPROFILE -Message 'Raw profile path leaked from baseline Markdown'
     Assert-True ($baselineMarkdown -notmatch '(?i)\bS-\d-\d+(?:-\d+){1,}\b') 'SID-shaped value leaked from baseline Markdown'
 
-    $allSectionsInvocation = Invoke-BaselineCollector -OutputDirectory $baselineOutput -Sections @('System', 'Storage', 'Memory', 'Startup', 'Security', 'Network')
+    $allBaselineOutput = Join-Path $sandbox.Path 'all-baseline-output'
+    New-Item -ItemType Directory -Path $allBaselineOutput | Out-Null
+    $allSectionsInvocation = Invoke-BaselineCollector -OutputDirectory $allBaselineOutput -Sections @('System', 'Storage', 'Memory', 'Startup', 'Security', 'Network')
     Assert-Equal 0 $allSectionsInvocation.ExitCode "All-section baseline collection failed: $($allSectionsInvocation.Output | Out-String)"
-    Assert-BaselineOutputContainsOnlyReports -OutputDirectory $baselineOutput
-    $allBaseline = (Get-Content -Raw -LiteralPath $baselineJsonPath) | ConvertFrom-Json
+    Assert-BaselineOutputContainsOnlyReports -OutputDirectory $allBaselineOutput
+    $allBaseline = (Get-Content -Raw -LiteralPath (Join-Path $allBaselineOutput 'baseline.json')) | ConvertFrom-Json
     foreach ($section in @('system', 'storage', 'memory', 'startup', 'security', 'network')) {
         Assert-True ($null -ne $allBaseline.$section) "All-section baseline is missing: $section"
     }
-    Assert-Equal $false $allBaseline.collectionContext.isAdministrator 'All-section baseline did not run as a non-administrator process'
+    if ($allBaseline.collectionContext.isAdministrator -ne $false) {
+        throw 'NON-ADMIN VERIFICATION UNAVAILABLE: the current test process is elevated; no scheduled task, UAC prompt, or unsafe restricted-token workaround is used.'
+    }
     foreach ($warning in @($allBaseline.warnings)) {
         foreach ($property in @('section', 'code', 'message')) {
             Assert-True ($warning.PSObject.Properties.Name -contains $property) "Baseline warning is not structured: $property"
         }
     }
 
-    foreach ($bundledScript in @($scriptPath, $collectorPath)) {
-        $scriptText = Get-Content -Raw -LiteralPath $bundledScript
-        foreach ($forbiddenToken in @('Remove-Item', 'Move-Item', 'Set-ItemProperty', 'New-ItemProperty', 'Stop-Service', 'Set-Service', 'Disable-ScheduledTask', 'Start-Process\s+-Verb\s+RunAs', 'reg\s+add', 'schtasks\s+/change')) {
-            Assert-True ($scriptText -notmatch "(?i)$forbiddenToken") "Bundled script contains prohibited mutation token '$forbiddenToken': $bundledScript"
-        }
+    $memoryProviderOutput = Join-Path $sandbox.Path 'memory-provider-output'
+    New-Item -ItemType Directory -Path $memoryProviderOutput | Out-Null
+    . $collectorPath -OutputDirectory $memoryProviderOutput -Sections System -SampleCount 1 -SampleIntervalSeconds 1
+    $memoryWarnings = [System.Collections.Generic.List[object]]::new()
+    $unavailableMemory = Get-MemorySnapshot -Warnings $memoryWarnings -RequestedSampleCount 1 -IntervalSeconds 1 -MemoryProvider ([System.Func[object]]{ throw [UnauthorizedAccessException]::new('denied for test') })
+    Assert-Equal $null $unavailableMemory.samples 'Fully unavailable memory collection must not report an empty successful sample set'
+    Assert-Equal 1 $memoryWarnings.Count 'Fully unavailable memory collection must add one warning'
+    Assert-Equal 'memory' $memoryWarnings[0].section 'Memory warning section is incorrect'
+    Assert-Equal 'sampleReadUnavailable' $memoryWarnings[0].code 'Memory warning code is incorrect'
+
+    Assert-NoDynamicOrMutatingBundledScriptAst -BundledScripts @($scriptPath, $collectorPath)
+    foreach ($astProbe in @(
+            [pscustomobject]@{ Source = "& ('re' + 'g.exe') add HKCU\Software\Probe /v Value /d 1"; Description = 'dynamically concatenated native command' },
+            [pscustomobject]@{ Source = 're`g.exe add HKCU\Software\Probe /v Value /d 1'; Description = 'backtick-obfuscated reg.exe command' },
+            [pscustomobject]@{ Source = 'schtasks.exe /change /tn Probe /disable'; Description = 'schtasks.exe mutation' },
+            [pscustomobject]@{ Source = "[IO.File]::Delete('probe')"; Description = '.NET file deletion' },
+            [pscustomobject]@{ Source = "[IO.File]::Move('from','to')"; Description = '.NET file move' }
+        )) {
+        Assert-AstSafetyProbeRejected -Source $astProbe.Source -Description $astProbe.Description
     }
 
     Assert-OutputDirectoryRejectedWithoutMutation -Path ([IO.Path]::GetPathRoot($testOutput).ToLowerInvariant()) -Description 'volume root with case variation'
@@ -228,6 +397,19 @@ try {
     Assert-True (($reparseItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) 'Reparse fixture is not a reparse point'
     Assert-OutputDirectoryRejectedWithoutMutation -Path $reparsePath -Description 'endpoint reparse point'
 
+    $reportReparseTarget = Join-Path $sandbox.Path 'report-reparse-target'
+    $reportReparseOutput = Join-Path $sandbox.Path 'report-reparse-output'
+    New-Item -ItemType Directory -Path $reportReparseTarget | Out-Null
+    New-Item -ItemType Directory -Path $reportReparseOutput | Out-Null
+    $reportReparsePath = Join-Path $reportReparseOutput 'baseline.json'
+    New-Item -ItemType Junction -Path $reportReparsePath -Target $reportReparseTarget | Out-Null
+    $reportReparseTargetBefore = Get-PathSnapshot -Path $reportReparseTarget
+    $reportReparseInvocation = Invoke-BaselineCollector -OutputDirectory $reportReparseOutput -Sections @('System', 'Storage', 'Memory')
+    $reportReparseTargetAfter = Get-PathSnapshot -Path $reportReparseTarget
+    Assert-True ($reportReparseInvocation.ExitCode -ne 0) 'Reparse-point baseline.json was accepted'
+    Assert-PathSnapshotUnchanged -Before $reportReparseTargetBefore -After $reportReparseTargetAfter -Description 'baseline.json reparse target'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $reportReparseOutput 'baseline.md'))) 'Reparse-point rejection left a partial report'
+
     $ancestorTarget = Join-Path $sandbox.Path 'ancestor-target'
     $ancestorLink = Join-Path $sandbox.Path 'ancestor-link'
     $ancestorChild = Join-Path $ancestorTarget 'child'
@@ -242,7 +424,7 @@ try {
     Assert-PathSnapshotUnchanged -Before $ancestorTargetBefore -After $ancestorTargetAfter -Description 'ancestor reparse target'
 }
 finally {
-    foreach ($linkPath in @($reparsePath, $ancestorLink)) {
+    foreach ($linkPath in @($reparsePath, $ancestorLink, $reportReparsePath)) {
         if ($null -ne $linkPath -and (Test-Path -LiteralPath $linkPath)) {
             $linkItem = Get-Item -LiteralPath $linkPath -Force
             if (($linkItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {

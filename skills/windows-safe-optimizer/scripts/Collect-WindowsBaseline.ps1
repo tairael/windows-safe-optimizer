@@ -54,7 +54,13 @@ function Resolve-ValidatedOutputDirectory {
     }
 
     try {
-        $inspectionJson = & $environmentInspectionScript -OutputDirectory $Path -AsJson
+        Push-Location -LiteralPath $PSScriptRoot
+        try {
+            $inspectionJson = & .\Test-WindowsOptimizerEnvironment.ps1 -OutputDirectory $Path -AsJson
+        }
+        finally {
+            Pop-Location
+        }
         $inspection = $inspectionJson | ConvertFrom-Json -ErrorAction Stop
         if ($null -eq $inspection -or [bool]$inspection.outputDirectoryIsReparsePoint) {
             throw 'The selected output directory did not pass safety validation.'
@@ -132,13 +138,14 @@ function Get-MemorySnapshot {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.Generic.List[object]]$Warnings,
         [Parameter(Mandatory = $true)][int]$RequestedSampleCount,
-        [Parameter(Mandatory = $true)][int]$IntervalSeconds
+        [Parameter(Mandatory = $true)][int]$IntervalSeconds,
+        [System.Func[object]]$MemoryProvider = [System.Func[object]]{ Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop }
     )
 
     $samples = [System.Collections.Generic.List[object]]::new()
     for ($sampleIndex = 1; $sampleIndex -le $RequestedSampleCount; $sampleIndex++) {
         try {
-            $operatingSystem = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+            $operatingSystem = $MemoryProvider.Invoke()
             $samples.Add([pscustomobject][ordered]@{
                     totalVisibleBytes = if ($null -eq $operatingSystem.TotalVisibleMemorySize) { $null } else { [Int64]$operatingSystem.TotalVisibleMemorySize * 1KB }
                     freePhysicalBytes = if ($null -eq $operatingSystem.FreePhysicalMemory) { $null } else { [Int64]$operatingSystem.FreePhysicalMemory * 1KB }
@@ -156,7 +163,7 @@ function Get-MemorySnapshot {
     return [pscustomobject][ordered]@{
         requestedSampleCount = $RequestedSampleCount
         sampleIntervalSeconds = $IntervalSeconds
-        samples = @($samples)
+        samples = if ($samples.Count -eq 0) { $null } else { @($samples) }
     }
 }
 
@@ -305,6 +312,102 @@ function ConvertTo-BaselineMarkdown {
     return ($lines -join [Environment]::NewLine)
 }
 
+function Assert-BaselineReportTargetIsAbsent {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $existingItem = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existingItem) {
+        throw 'A baseline report target already exists; reports are never overwritten.'
+    }
+}
+
+function Open-NewBaselineReport {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    return [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        ([IO.FileShare]::Read -bor [IO.FileShare]::Delete)
+    )
+}
+
+function Remove-NewlyCreatedBaselineReport {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowNull()][IO.FileStream]$Stream
+    )
+
+    if ($null -eq $Stream) {
+        return
+    }
+
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or $item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw 'A newly created baseline report could not be safely cleaned up.'
+    }
+
+    [IO.File]::Delete($Path)
+}
+
+function Write-NewBaselineReports {
+    param(
+        [Parameter(Mandatory = $true)][string]$JsonPath,
+        [Parameter(Mandatory = $true)][string]$MarkdownPath,
+        [Parameter(Mandatory = $true)][string]$Json,
+        [Parameter(Mandatory = $true)][string]$Markdown
+    )
+
+    Assert-BaselineReportTargetIsAbsent -Path $JsonPath
+    Assert-BaselineReportTargetIsAbsent -Path $MarkdownPath
+
+    $jsonStream = $null
+    $markdownStream = $null
+    try {
+        $jsonStream = Open-NewBaselineReport -Path $JsonPath
+        $markdownStream = Open-NewBaselineReport -Path $MarkdownPath
+
+        $utf8WithoutBom = [Text.UTF8Encoding]::new($false)
+        $jsonWriter = [IO.StreamWriter]::new($jsonStream, $utf8WithoutBom, 1024, $true)
+        try {
+            $jsonWriter.Write($Json)
+            $jsonWriter.Flush()
+        }
+        finally {
+            $jsonWriter.Dispose()
+        }
+
+        $markdownWriter = [IO.StreamWriter]::new($markdownStream, $utf8WithoutBom, 1024, $true)
+        try {
+            $markdownWriter.Write($Markdown)
+            $markdownWriter.Flush()
+        }
+        finally {
+            $markdownWriter.Dispose()
+        }
+    }
+    catch {
+        $originalException = $_
+        foreach ($createdReport in @(
+                [pscustomobject]@{ Path = $markdownPath; Stream = $markdownStream },
+                [pscustomobject]@{ Path = $jsonPath; Stream = $jsonStream }
+            )) {
+            if ($null -ne $createdReport.Stream) {
+                Remove-NewlyCreatedBaselineReport -Path $createdReport.Path -Stream $createdReport.Stream
+            }
+        }
+        throw $originalException
+    }
+    finally {
+        if ($null -ne $markdownStream) {
+            $markdownStream.Dispose()
+        }
+        if ($null -ne $jsonStream) {
+            $jsonStream.Dispose()
+        }
+    }
+}
+
 $safeOutputDirectory = Resolve-ValidatedOutputDirectory -Path $OutputDirectory
 $jsonPath = [IO.Path]::GetFullPath((Join-Path $safeOutputDirectory 'baseline.json'))
 $markdownPath = [IO.Path]::GetFullPath((Join-Path $safeOutputDirectory 'baseline.md'))
@@ -341,5 +444,4 @@ $baseline = [pscustomobject][ordered]@{
 
 $json = $baseline | ConvertTo-Json -Depth 8
 $markdown = ConvertTo-BaselineMarkdown -Baseline $baseline
-Set-Content -LiteralPath $jsonPath -Value $json -Encoding UTF8
-Set-Content -LiteralPath $markdownPath -Value $markdown -Encoding UTF8
+Write-NewBaselineReports -JsonPath $jsonPath -MarkdownPath $markdownPath -Json $json -Markdown $markdown

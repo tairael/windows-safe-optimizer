@@ -33,6 +33,22 @@ function Test-SamePath {
     return [string]::Equals($normalizedLeft, $normalizedRight, [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-SamePathOrChildPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Candidate,
+        [Parameter(Mandatory = $true)][string]$Parent
+    )
+
+    $normalizedCandidate = ConvertTo-NormalizedFileSystemPath -Path $Candidate
+    $normalizedParent = ConvertTo-NormalizedFileSystemPath -Path $Parent
+    if ([string]::Equals($normalizedCandidate, $normalizedParent, [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    $parentPrefix = $normalizedParent + [IO.Path]::DirectorySeparatorChar
+    return $normalizedCandidate.StartsWith($parentPrefix, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-SupportedWindowsProductName {
     param([AllowNull()][string]$ProductName)
 
@@ -57,14 +73,20 @@ function Resolve-SafeOutputDirectory {
     foreach ($protectedDirectory in @(
             $env:windir,
             $env:ProgramFiles,
-            [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-        )) {
+            ${env:ProgramFiles(x86)},
+            $env:ProgramW6432
+        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique) {
         if (-not [string]::IsNullOrWhiteSpace($protectedDirectory)) {
             $protectedFullPath = ConvertTo-NormalizedFileSystemPath -Path $protectedDirectory
-            if (Test-SamePath -Left $fullPath -Right $protectedFullPath) {
+            if (Test-SamePathOrChildPath -Candidate $fullPath -Parent $protectedFullPath) {
                 throw "Output directory is protected and cannot be used: $fullPath"
             }
         }
+    }
+
+    $profileRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    if (-not [string]::IsNullOrWhiteSpace($profileRoot) -and (Test-SamePath -Left $fullPath -Right $profileRoot)) {
+        throw "Output directory is protected and cannot be used: $fullPath"
     }
 
     $relativePath = $fullPath.Substring($volumeRoot.Length)
