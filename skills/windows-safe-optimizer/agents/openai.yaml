@@ -1,4 +1,4 @@
 interface:
   display_name: "Windows Safe Optimizer"
-  short_description: "Safely diagnose and optimize Windows 10 and 11 PCs"
-  default_prompt: "Use $windows-safe-optimizer to audit this Windows PC and explain safe, reversible improvements."
+  short_description: "Guided Windows 10/11 diagnostics with safety gates"
+  default_prompt: "Use $windows-safe-optimizer to audit this Windows PC, choose an automation mode, and propose evidence-based reversible improvements."
