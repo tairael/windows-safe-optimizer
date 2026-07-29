@@ -34,8 +34,13 @@ foreach ($section in $requiredSections) {
     $previousIndex = $sectionIndex
 }
 
+$operationCardStart = $skill.IndexOf('## Operation card', [System.StringComparison]::Ordinal)
+$operationCardEnd = $skill.IndexOf('## Module routing', [System.StringComparison]::Ordinal)
+Assert-True (($operationCardStart -ge 0) -and ($operationCardEnd -gt $operationCardStart)) 'Operation-card section boundaries are invalid'
+$operationCard = $skill.Substring($operationCardStart, $operationCardEnd - $operationCardStart)
+
 foreach ($field in @('Finding', 'Evidence', 'Expected gain', 'Feature impact', 'Risk', 'Action', 'Backup', 'Rollback', 'Validation', 'Stop condition')) {
-    Assert-True ($skill.Contains("| $field |")) "Missing operation-card field: $field"
+    Assert-True ($operationCard.Contains("| $field |")) "Missing operation-card field in operation-card section: $field"
 }
 
 $routingStart = $skill.IndexOf('## Module routing', [System.StringComparison]::Ordinal)
