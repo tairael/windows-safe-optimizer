@@ -328,84 +328,81 @@ function Open-NewBaselineReport {
         $Path,
         [IO.FileMode]::CreateNew,
         [IO.FileAccess]::Write,
-        ([IO.FileShare]::Read -bor [IO.FileShare]::Delete)
+        [IO.FileShare]::None
     )
 }
 
-function Remove-NewlyCreatedBaselineReport {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [AllowNull()][IO.FileStream]$Stream
-    )
-
-    if ($null -eq $Stream) {
-        return
-    }
-
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if ($null -eq $item -or $item.PSIsContainer -or (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
-        throw 'A newly created baseline report could not be safely cleaned up.'
-    }
-
-    [IO.File]::Delete($Path)
-}
-
-function Write-NewBaselineReports {
+function Open-BaselineReportHandles {
     param(
         [Parameter(Mandatory = $true)][string]$JsonPath,
         [Parameter(Mandatory = $true)][string]$MarkdownPath,
-        [Parameter(Mandatory = $true)][string]$Json,
-        [Parameter(Mandatory = $true)][string]$Markdown
+        [System.Func[string, IO.FileStream]]$OpenProvider = [System.Func[string, IO.FileStream]]{
+            param([string]$Path)
+            Open-NewBaselineReport -Path $Path
+        }
     )
 
     Assert-BaselineReportTargetIsAbsent -Path $JsonPath
     Assert-BaselineReportTargetIsAbsent -Path $MarkdownPath
 
     $jsonStream = $null
-    $markdownStream = $null
     try {
-        $jsonStream = Open-NewBaselineReport -Path $JsonPath
-        $markdownStream = Open-NewBaselineReport -Path $MarkdownPath
-
-        $utf8WithoutBom = [Text.UTF8Encoding]::new($false)
-        $jsonWriter = [IO.StreamWriter]::new($jsonStream, $utf8WithoutBom, 1024, $true)
-        try {
-            $jsonWriter.Write($Json)
-            $jsonWriter.Flush()
-        }
-        finally {
-            $jsonWriter.Dispose()
-        }
-
-        $markdownWriter = [IO.StreamWriter]::new($markdownStream, $utf8WithoutBom, 1024, $true)
-        try {
-            $markdownWriter.Write($Markdown)
-            $markdownWriter.Flush()
-        }
-        finally {
-            $markdownWriter.Dispose()
+        $jsonStream = $OpenProvider.Invoke($JsonPath)
+        $markdownStream = $OpenProvider.Invoke($MarkdownPath)
+        return [pscustomobject]@{
+            JsonStream = $jsonStream
+            MarkdownStream = $markdownStream
         }
     }
     catch {
-        $originalException = $_
-        foreach ($createdReport in @(
-                [pscustomobject]@{ Path = $markdownPath; Stream = $markdownStream },
-                [pscustomobject]@{ Path = $jsonPath; Stream = $jsonStream }
-            )) {
-            if ($null -ne $createdReport.Stream) {
-                Remove-NewlyCreatedBaselineReport -Path $createdReport.Path -Stream $createdReport.Stream
-            }
-        }
-        throw $originalException
-    }
-    finally {
-        if ($null -ne $markdownStream) {
-            $markdownStream.Dispose()
-        }
         if ($null -ne $jsonStream) {
             $jsonStream.Dispose()
         }
+        throw
     }
+}
+
+function Close-BaselineReportHandles {
+    param([Parameter(Mandatory = $true)][psobject]$Handles)
+
+    if ($null -ne $Handles.MarkdownStream) {
+        $Handles.MarkdownStream.Dispose()
+    }
+    if ($null -ne $Handles.JsonStream) {
+        $Handles.JsonStream.Dispose()
+    }
+}
+
+function Write-TextToBaselineReportStream {
+    param(
+        [Parameter(Mandatory = $true)][IO.FileStream]$Stream,
+        [Parameter(Mandatory = $true)][string]$Content
+    )
+
+    $utf8WithoutBom = [Text.UTF8Encoding]::new($false)
+    $writer = [IO.StreamWriter]::new($Stream, $utf8WithoutBom, 1024, $true)
+    try {
+        $writer.Write($Content)
+        $writer.Flush()
+    }
+    finally {
+        $writer.Dispose()
+    }
+}
+
+function Write-BaselineReportsToHandles {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Handles,
+        [Parameter(Mandatory = $true)][string]$Json,
+        [Parameter(Mandatory = $true)][string]$Markdown,
+        [System.Action[IO.FileStream, string]]$WriterProvider = [System.Action[IO.FileStream, string]]{
+            param([IO.FileStream]$Stream, [string]$Content)
+            Write-TextToBaselineReportStream -Stream $Stream -Content $Content
+        }
+    )
+
+    $WriterProvider.Invoke($Handles.JsonStream, $Json)
+    $WriterProvider.Invoke($Handles.MarkdownStream, $Markdown)
 }
 
 $safeOutputDirectory = Resolve-ValidatedOutputDirectory -Path $OutputDirectory
@@ -428,20 +425,31 @@ $invalidSections = @($selectedSections | Where-Object { $_ -notin $validSections
 if ($selectedSections.Count -eq 0 -or $invalidSections.Count -ne 0) {
     throw 'Sections must contain one or more supported collector names.'
 }
-$warnings = [System.Collections.Generic.List[object]]::new()
-$baseline = [pscustomobject][ordered]@{
-    schemaVersion = '1.0'
-    generatedAt = [DateTime]::UtcNow.ToString('o')
-    collectionContext = Get-CollectionContext -Warnings $warnings -SelectedSections $selectedSections -RequestedSampleCount $SampleCount -IntervalSeconds $SampleIntervalSeconds
-    system = if ($selectedSections -contains 'System') { Get-SystemSnapshot -Warnings $warnings } else { $null }
-    storage = if ($selectedSections -contains 'Storage') { Get-StorageSnapshot -Warnings $warnings } else { $null }
-    memory = if ($selectedSections -contains 'Memory') { Get-MemorySnapshot -Warnings $warnings -RequestedSampleCount $SampleCount -IntervalSeconds $SampleIntervalSeconds } else { $null }
-    startup = if ($selectedSections -contains 'Startup') { Get-StartupSnapshot -Warnings $warnings } else { $null }
-    security = if ($selectedSections -contains 'Security') { Get-SecuritySnapshot -Warnings $warnings } else { $null }
-    network = if ($selectedSections -contains 'Network') { Get-NetworkSnapshot -Warnings $warnings } else { $null }
-    warnings = @($warnings)
-}
 
-$json = $baseline | ConvertTo-Json -Depth 8
-$markdown = ConvertTo-BaselineMarkdown -Baseline $baseline
-Write-NewBaselineReports -JsonPath $jsonPath -MarkdownPath $markdownPath -Json $json -Markdown $markdown
+$finalSafeOutputDirectory = Resolve-ValidatedOutputDirectory -Path $OutputDirectory
+if (-not [string]::Equals($safeOutputDirectory, $finalSafeOutputDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'The selected output directory identity changed before report handles were acquired.'
+}
+$reportHandles = Open-BaselineReportHandles -JsonPath $jsonPath -MarkdownPath $markdownPath
+try {
+    $warnings = [System.Collections.Generic.List[object]]::new()
+    $baseline = [pscustomobject][ordered]@{
+        schemaVersion = '1.0'
+        generatedAt = [DateTime]::UtcNow.ToString('o')
+        collectionContext = Get-CollectionContext -Warnings $warnings -SelectedSections $selectedSections -RequestedSampleCount $SampleCount -IntervalSeconds $SampleIntervalSeconds
+        system = if ($selectedSections -contains 'System') { Get-SystemSnapshot -Warnings $warnings } else { $null }
+        storage = if ($selectedSections -contains 'Storage') { Get-StorageSnapshot -Warnings $warnings } else { $null }
+        memory = if ($selectedSections -contains 'Memory') { Get-MemorySnapshot -Warnings $warnings -RequestedSampleCount $SampleCount -IntervalSeconds $SampleIntervalSeconds } else { $null }
+        startup = if ($selectedSections -contains 'Startup') { Get-StartupSnapshot -Warnings $warnings } else { $null }
+        security = if ($selectedSections -contains 'Security') { Get-SecuritySnapshot -Warnings $warnings } else { $null }
+        network = if ($selectedSections -contains 'Network') { Get-NetworkSnapshot -Warnings $warnings } else { $null }
+        warnings = @($warnings)
+    }
+
+    $json = $baseline | ConvertTo-Json -Depth 8
+    $markdown = ConvertTo-BaselineMarkdown -Baseline $baseline
+    Write-BaselineReportsToHandles -Handles $reportHandles -Json $json -Markdown $markdown
+}
+finally {
+    Close-BaselineReportHandles -Handles $reportHandles
+}

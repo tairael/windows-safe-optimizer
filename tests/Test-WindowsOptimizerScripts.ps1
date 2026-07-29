@@ -91,11 +91,19 @@ function Get-ScriptAstSafetyViolations {
     param([Parameter(Mandatory = $true)][Management.Automation.Language.Ast]$Ast)
 
     $violations = [System.Collections.Generic.List[string]]::new()
-    $forbiddenCommandNames = @(
-        'Remove-Item', 'Move-Item', 'Copy-Item', 'New-Item', 'Set-Content', 'Add-Content', 'Clear-Content', 'Out-File',
-        'Set-ItemProperty', 'New-ItemProperty', 'Stop-Service', 'Set-Service',
-        'Disable-ScheduledTask', 'Start-Process', 'reg', 'reg.exe', 'schtasks', 'schtasks.exe', 'cmd', 'cmd.exe',
-        'del', 'erase', 'rd', 'rmdir', 'ri', 'rm', 'mv', 'move'
+    $allowedCommandNames = @(
+        'Add-BaselineWarning', 'Assert-BaselineReportTargetIsAbsent', 'Close-BaselineReportHandles',
+        'Collect-WindowsBaseline.ps1', 'ConvertFrom-Json', 'ConvertTo-BaselineMarkdown', 'ConvertTo-Json',
+        'ConvertTo-NormalizedFileSystemPath', 'ForEach-Object', 'Get-CimInstance', 'Get-CollectionContext',
+        'Get-IsAdministrator', 'Get-Item', 'Get-ItemProperty', 'Get-MemorySnapshot', 'Get-MpComputerStatus',
+        'Get-NetAdapter', 'Get-NetFirewallProfile', 'Get-NetRoute', 'Get-NetworkSnapshot',
+        'Get-NullableBooleanProperty', 'Get-SecuritySnapshot', 'Get-StartupSnapshot', 'Get-StorageSnapshot',
+        'Get-SystemSnapshot', 'Get-WindowsVersionInfo', 'Join-Path', 'Open-BaselineReportHandles',
+        'Open-NewBaselineReport', 'Pop-Location', 'Push-Location', 'Resolve-SafeOutputDirectory',
+        'Resolve-ValidatedOutputDirectory', 'Select-Object', 'Set-StrictMode', 'Split-Path', 'Start-Sleep',
+        'Test-Path', 'Test-SamePath', 'Test-SamePathOrChildPath', 'Test-SupportedWindowsProductName',
+        'Test-WindowsOptimizerEnvironment.ps1', 'Where-Object', 'Write-BaselineReportsToHandles',
+        'Write-TextToBaselineReportStream'
     )
     foreach ($command in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true))) {
         $commandName = $command.GetCommandName()
@@ -103,32 +111,61 @@ function Get-ScriptAstSafetyViolations {
             $violations.Add('dynamic command')
             continue
         }
-        if ($forbiddenCommandNames -contains $commandName.ToLowerInvariant()) {
-            $violations.Add("prohibited command: $commandName")
-        }
-        if ($commandName.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) {
-            $violations.Add("native executable: $commandName")
-        }
-        if ($null -ne (Get-Alias -Name $commandName -ErrorAction SilentlyContinue)) {
-            $violations.Add("alias command: $commandName")
+        $leafCommandName = @($commandName -split '[\\/]')[-1]
+        if ($allowedCommandNames -notcontains $leafCommandName) {
+            $violations.Add("command outside allowlist: $commandName")
         }
     }
 
+    $allowedPropertyNames = @(
+        '$sectionName', 'Administrator', 'AltDirectorySeparatorChar', 'Attributes', 'BuildNumber', 'Count', 'CreateNew', 'CurrentBuild',
+        'CurrentBuildNumber', 'Delete', 'DestinationPrefix', 'DeviceID', 'DirectorySeparatorChar',
+        'DisplayVersion', 'Enabled', 'Exception', 'FileSystem', 'FreePhysicalMemory', 'FreeSpace',
+        'IsReparsePoint', 'JsonStream', 'Length', 'MarkdownStream', 'Message', 'NewLine', 'None', 'OSArchitecture',
+        'OrdinalIgnoreCase', 'OutputDirectory', 'OutputDirectoryIsReparsePoint', 'PSIsContainer', 'PSObject', 'PSVersion', 'Path', 'ProductName',
+        'Properties', 'ReleaseId', 'Size', 'Status', 'SupportedOS', 'TotalVisibleMemorySize', 'UtcNow',
+        'UserProfile', 'Value', 'Warnings', 'Write', 'code', 'collectionContext', 'generatedAt', 'isAdministrator',
+        'message', 'outputDirectory', 'outputDirectoryIsReparsePoint', 'schemaVersion', 'section',
+        'sections', 'warnings', 'ReparsePoint'
+    )
     foreach ($member in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.MemberExpressionAst] }, $true))) {
         $memberName = $member.Member.Extent.Text
-        $isDangerousCall = $member.Extent.Text -match '(?i)(::|\.)(Delete|Move|MoveTo|Replace|Copy|CopyTo|SetValue)\('
-        if ($isDangerousCall) {
-            $containingFunction = $member
-            while ($null -ne $containingFunction -and -not ($containingFunction -is [Management.Automation.Language.FunctionDefinitionAst])) {
-                $containingFunction = $containingFunction.Parent
+        if (-not ($member -is [Management.Automation.Language.InvokeMemberExpressionAst])) {
+            if ($allowedPropertyNames -notcontains $memberName) {
+                $violations.Add("property outside allowlist: $memberName")
             }
-            $isExactOwnedCleanup = $memberName -eq 'Delete' -and
-                $null -ne $containingFunction -and
-                $containingFunction.Name -eq 'Remove-NewlyCreatedBaselineReport' -and
-                $member.Extent.Text -eq '[IO.File]::Delete($Path)'
-            if (-not $isExactOwnedCleanup) {
-                $violations.Add("dangerous .NET member call: $memberName")
-            }
+            continue
+        }
+
+        $containingFunction = $member
+        while ($null -ne $containingFunction -and -not ($containingFunction -is [Management.Automation.Language.FunctionDefinitionAst])) {
+            $containingFunction = $containingFunction.Parent
+        }
+        $functionName = if ($null -eq $containingFunction) { '<script>' } else { $containingFunction.Name }
+        $expressionText = $member.Expression.Extent.Text
+        $safeReadOnlyMethod = $memberName -in @(
+            'Contains', 'EndsWith', 'Equals', 'GetCurrent', 'GetFileName', 'GetFolderPath', 'GetFullPath', 'GetPathRoot',
+            'IsInRole', 'IsNullOrWhiteSpace', 'StartsWith', 'Substring', 'ToString', 'Trim', 'TrimEnd'
+        )
+        $safeListAdd = $memberName -eq 'Add' -and $expressionText -in @('$warnings', '$Warnings', '$samples', '$lines')
+        $safeConstructor = $memberName -eq 'new' -and $expressionText -in @(
+            '[Collections.Generic.List[string]]', '[System.Collections.Generic.List[object]]',
+            '[System.Collections.Generic.List[string]]', '[Security.Principal.WindowsPrincipal]',
+            '[Text.UTF8Encoding]', '[IO.StreamWriter]'
+        )
+        $safeProviderInvoke = $memberName -eq 'Invoke' -and (
+            ($expressionText -eq '$MemoryProvider' -and $functionName -eq 'Get-MemorySnapshot') -or
+            ($expressionText -eq '$OpenProvider' -and $functionName -eq 'Open-BaselineReportHandles') -or
+            ($expressionText -eq '$WriterProvider' -and $functionName -eq 'Write-BaselineReportsToHandles')
+        )
+        $safeReportOpen = $memberName -eq 'Open' -and $expressionText -eq '[IO.File]' -and
+            $functionName -eq 'Open-NewBaselineReport' -and
+            $member.Extent.Text.Contains('[IO.FileMode]::CreateNew') -and
+            $member.Extent.Text.Contains('[IO.FileShare]::None')
+        $safeWriterMethod = $memberName -in @('Write', 'Flush', 'Dispose') -and
+            $expressionText -in @('$writer', '$jsonStream', '$markdownStream', '$Handles.JsonStream', '$Handles.MarkdownStream')
+        if (-not ($safeReadOnlyMethod -or $safeListAdd -or $safeConstructor -or $safeProviderInvoke -or $safeReportOpen -or $safeWriterMethod)) {
+            $violations.Add("member call outside allowlist: $functionName/$expressionText.$memberName")
         }
     }
 
@@ -155,14 +192,7 @@ function Assert-NoDynamicOrMutatingBundledScriptAst {
             Assert-Equal 1 $fileOpenCalls.Count 'Collector must have exactly one no-clobber file-open primitive'
             Assert-True ($fileOpenCalls[0].Extent.Text.Contains('[IO.FileMode]::CreateNew')) 'Collector file-open primitive is not exclusive CreateNew'
 
-            $reportOpenCommands = @($ast.FindAll({
-                        param($node)
-                        $node -is [Management.Automation.Language.CommandAst] -and
-                        $node.GetCommandName() -eq 'Open-NewBaselineReport'
-                    }, $true))
-            Assert-Equal 2 $reportOpenCommands.Count 'Collector must open exactly two report targets'
-            $reportOpenExtents = @($reportOpenCommands.Extent.Text | Sort-Object)
-            Assert-Equal 'Open-NewBaselineReport -Path $JsonPath|Open-NewBaselineReport -Path $MarkdownPath' ($reportOpenExtents -join '|') 'Collector report opens are not precisely limited to the two validated report paths'
+            Assert-True ($fileOpenCalls[0].Extent.Text.Contains('[IO.FileShare]::None')) 'Collector report handle is not held with FileShare.None'
         }
     }
 }
@@ -250,6 +280,7 @@ $sandbox = $null
 $reparsePath = $null
 $ancestorLink = $null
 $reportReparsePath = $null
+$handleSwapJunctionPath = $null
 try {
     $sandbox = New-TestRunnerSandbox -RepositoryRoot $repositoryRoot -TemporaryParentGuard $temporaryParentGuard
     $testOutput = Join-Path $sandbox.Path 'output'
@@ -370,13 +401,105 @@ try {
     Assert-Equal 'memory' $memoryWarnings[0].section 'Memory warning section is incorrect'
     Assert-Equal 'sampleReadUnavailable' $memoryWarnings[0].code 'Memory warning code is incorrect'
 
+    $handleSwapOriginal = Join-Path $sandbox.Path 'handle-swap-output'
+    $handleSwapRenamed = Join-Path $sandbox.Path 'handle-swap-output-renamed'
+    $handleSwapTarget = Join-Path $sandbox.Path 'handle-swap-junction-target'
+    New-Item -ItemType Directory -Path $handleSwapOriginal | Out-Null
+    New-Item -ItemType Directory -Path $handleSwapTarget | Out-Null
+    $handleSwapHandles = Open-BaselineReportHandles `
+        -JsonPath (Join-Path $handleSwapOriginal 'baseline.json') `
+        -MarkdownPath (Join-Path $handleSwapOriginal 'baseline.md')
+    $handleSwapRenameBlocked = $false
+    try {
+        try {
+            [IO.Directory]::Move($handleSwapOriginal, $handleSwapRenamed)
+        }
+        catch [IO.IOException] {
+            $handleSwapRenameBlocked = $true
+        }
+        Write-BaselineReportsToHandles -Handles $handleSwapHandles -Json 'bound json' -Markdown 'bound markdown'
+    }
+    finally {
+        Close-BaselineReportHandles -Handles $handleSwapHandles
+    }
+    Assert-True $handleSwapRenameBlocked 'FileShare.None report leases did not block parent directory replacement during collection'
+    [IO.Directory]::Move($handleSwapOriginal, $handleSwapRenamed)
+    $handleSwapJunctionPath = $handleSwapOriginal
+    New-Item -ItemType Junction -Path $handleSwapJunctionPath -Target $handleSwapTarget | Out-Null
+    Assert-Equal 'bound json' (Get-Content -Raw -LiteralPath (Join-Path $handleSwapRenamed 'baseline.json')) 'JSON write escaped its pre-bound handle after parent replacement'
+    Assert-Equal 'bound markdown' (Get-Content -Raw -LiteralPath (Join-Path $handleSwapRenamed 'baseline.md')) 'Markdown write escaped its pre-bound handle after parent replacement'
+    Assert-Equal 0 @(Get-ChildItem -LiteralPath $handleSwapTarget -Force).Count 'Parent-path junction target was modified after handle binding'
+
+    $secondOpenFailureOutput = Join-Path $sandbox.Path 'second-open-failure-output'
+    New-Item -ItemType Directory -Path $secondOpenFailureOutput | Out-Null
+    $secondOpenJson = Join-Path $secondOpenFailureOutput 'baseline.json'
+    $secondOpenMarkdown = Join-Path $secondOpenFailureOutput 'baseline.md'
+    $openFailureProvider = [System.Func[string, IO.FileStream]]{
+        param([string]$Path)
+        if ([IO.Path]::GetFileName($Path) -eq 'baseline.json') {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            Set-Content -LiteralPath $secondOpenMarkdown -Value 'replacement sentinel' -NoNewline
+            return $stream
+        }
+        return [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    }
+    $secondOpenFailed = $false
+    try {
+        [void](Open-BaselineReportHandles -JsonPath $secondOpenJson -MarkdownPath $secondOpenMarkdown -OpenProvider $openFailureProvider)
+    }
+    catch {
+        $secondOpenFailed = $true
+    }
+    Assert-True $secondOpenFailed 'Injected second report open failure was not surfaced'
+    Assert-True (Test-Path -LiteralPath $secondOpenJson -PathType Leaf) 'First pre-bound report disappeared after second open failure'
+    Assert-Equal 0 (Get-Item -LiteralPath $secondOpenJson).Length 'First pre-bound report was unexpectedly written after second open failure'
+    Assert-Equal 'replacement sentinel' (Get-Content -Raw -LiteralPath $secondOpenMarkdown) 'Replacement sentinel changed after second open failure'
+
+    $writerFailureOutput = Join-Path $sandbox.Path 'writer-failure-output'
+    New-Item -ItemType Directory -Path $writerFailureOutput | Out-Null
+    $writerFailureSentinel = Join-Path $writerFailureOutput 'unrelated-sentinel.txt'
+    Set-Content -LiteralPath $writerFailureSentinel -Value 'writer sentinel' -NoNewline
+    $writerFailureHandles = Open-BaselineReportHandles `
+        -JsonPath (Join-Path $writerFailureOutput 'baseline.json') `
+        -MarkdownPath (Join-Path $writerFailureOutput 'baseline.md')
+    $writerInvocationCount = [System.Collections.Generic.List[int]]::new()
+    $failingWriter = [System.Action[IO.FileStream, string]]{
+        param([IO.FileStream]$Stream, [string]$Content)
+        $writerInvocationCount.Add(1)
+        if ($writerInvocationCount.Count -eq 2) {
+            throw [IO.IOException]::new('injected writer failure')
+        }
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Content)
+        $Stream.Write($bytes, 0, $bytes.Length)
+        $Stream.Flush()
+    }
+    $writerFailed = $false
+    try {
+        Write-BaselineReportsToHandles -Handles $writerFailureHandles -Json 'written before failure' -Markdown 'must fail' -WriterProvider $failingWriter
+    }
+    catch {
+        $writerFailed = $true
+    }
+    finally {
+        Close-BaselineReportHandles -Handles $writerFailureHandles
+    }
+    Assert-True $writerFailed 'Injected report writer failure was not surfaced'
+    Assert-Equal 'writer sentinel' (Get-Content -Raw -LiteralPath $writerFailureSentinel) 'Writer failure modified an unrelated pre-existing object'
+    Assert-Equal 'written before failure' (Get-Content -Raw -LiteralPath (Join-Path $writerFailureOutput 'baseline.json')) 'Writer failure deleted or changed the already-bound JSON report'
+    Assert-Equal 0 (Get-Item -LiteralPath (Join-Path $writerFailureOutput 'baseline.md')).Length 'Writer failure should leave the second pre-bound report empty'
+
     Assert-NoDynamicOrMutatingBundledScriptAst -BundledScripts @($scriptPath, $collectorPath)
     foreach ($astProbe in @(
             [pscustomobject]@{ Source = "& ('re' + 'g.exe') add HKCU\Software\Probe /v Value /d 1"; Description = 'dynamically concatenated native command' },
             [pscustomobject]@{ Source = 're`g.exe add HKCU\Software\Probe /v Value /d 1'; Description = 'backtick-obfuscated reg.exe command' },
             [pscustomobject]@{ Source = 'schtasks.exe /change /tn Probe /disable'; Description = 'schtasks.exe mutation' },
             [pscustomobject]@{ Source = "[IO.File]::Delete('probe')"; Description = '.NET file deletion' },
-            [pscustomobject]@{ Source = "[IO.File]::Move('from','to')"; Description = '.NET file move' }
+            [pscustomobject]@{ Source = "[IO.File]::Move('from','to')"; Description = '.NET file move' },
+            [pscustomobject]@{ Source = 'Microsoft.PowerShell.Management\Remove-Item -LiteralPath probe'; Description = 'module-qualified Remove-Item' },
+            [pscustomobject]@{ Source = 'Set-Acl -LiteralPath probe -AclObject $acl'; Description = 'ACL mutation' },
+            [pscustomobject]@{ Source = 'Invoke-WebRequest https://example.invalid'; Description = 'network request' },
+            [pscustomobject]@{ Source = 'Register-ScheduledTask -TaskName Probe -Action $action'; Description = 'scheduled task registration' },
+            [pscustomobject]@{ Source = "[IO.File]::WriteAllText('probe','content')"; Description = '.NET path write' }
         )) {
         Assert-AstSafetyProbeRejected -Source $astProbe.Source -Description $astProbe.Description
     }
@@ -424,7 +547,7 @@ try {
     Assert-PathSnapshotUnchanged -Before $ancestorTargetBefore -After $ancestorTargetAfter -Description 'ancestor reparse target'
 }
 finally {
-    foreach ($linkPath in @($reparsePath, $ancestorLink, $reportReparsePath)) {
+    foreach ($linkPath in @($reparsePath, $ancestorLink, $reportReparsePath, $handleSwapJunctionPath)) {
         if ($null -ne $linkPath -and (Test-Path -LiteralPath $linkPath)) {
             $linkItem = Get-Item -LiteralPath $linkPath -Force
             if (($linkItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
