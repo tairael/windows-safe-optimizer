@@ -10,26 +10,46 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function ConvertTo-NormalizedFileSystemPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $volumeRoot = [IO.Path]::GetPathRoot($fullPath)
+    if ([string]::Equals($fullPath, $volumeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        return $volumeRoot
+    }
+
+    return $fullPath.TrimEnd([char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar))
+}
+
 function Test-SamePath {
     param(
         [Parameter(Mandatory = $true)][string]$Left,
         [Parameter(Mandatory = $true)][string]$Right
     )
 
-    return [string]::Equals($Left, $Right, [StringComparison]::OrdinalIgnoreCase)
+    $normalizedLeft = ConvertTo-NormalizedFileSystemPath -Path $Left
+    $normalizedRight = ConvertTo-NormalizedFileSystemPath -Path $Right
+    return [string]::Equals($normalizedLeft, $normalizedRight, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-SupportedWindowsProductName {
+    param([AllowNull()][string]$ProductName)
+
+    return -not [string]::IsNullOrWhiteSpace($ProductName) -and $ProductName -match '^Windows (10|11)\b'
 }
 
 function Resolve-SafeOutputDirectory {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     try {
-        $fullPath = [IO.Path]::GetFullPath($Path)
+        $fullPath = ConvertTo-NormalizedFileSystemPath -Path $Path
     }
     catch {
         throw "Output directory is not a valid filesystem path: $Path"
     }
 
-    $volumeRoot = [IO.Path]::GetPathRoot($fullPath)
+    $volumeRoot = ConvertTo-NormalizedFileSystemPath -Path ([IO.Path]::GetPathRoot($fullPath))
     if (Test-SamePath -Left $fullPath -Right $volumeRoot) {
         throw "Output directory cannot be a volume root: $fullPath"
     }
@@ -40,25 +60,33 @@ function Resolve-SafeOutputDirectory {
             [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
         )) {
         if (-not [string]::IsNullOrWhiteSpace($protectedDirectory)) {
-            $protectedFullPath = [IO.Path]::GetFullPath($protectedDirectory)
+            $protectedFullPath = ConvertTo-NormalizedFileSystemPath -Path $protectedDirectory
             if (Test-SamePath -Left $fullPath -Right $protectedFullPath) {
                 throw "Output directory is protected and cannot be used: $fullPath"
             }
         }
     }
 
-    try {
-        $item = Get-Item -LiteralPath $fullPath -Force -ErrorAction Stop
-    }
-    catch {
-        throw "Output directory must already exist and be accessible: $fullPath"
+    $relativePath = $fullPath.Substring($volumeRoot.Length)
+    $segments = @($relativePath -split '[\\/]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $currentPath = $volumeRoot
+    $item = $null
+    foreach ($segment in $segments) {
+        $currentPath = Join-Path -Path $currentPath -ChildPath $segment
+        try {
+            $item = Get-Item -LiteralPath $currentPath -Force -ErrorAction Stop
+        }
+        catch {
+            throw "Output directory must already exist and be accessible: $fullPath"
+        }
+
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Output directory cannot contain a reparse point: $currentPath"
+        }
     }
 
-    if (-not $item.PSIsContainer) {
+    if ($null -eq $item -or -not $item.PSIsContainer) {
         throw "Output directory must be a directory: $fullPath"
-    }
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Output directory cannot be a reparse point: $fullPath"
     }
 
     return [pscustomobject]@{
@@ -94,7 +122,7 @@ function Get-WindowsVersionInfo {
 
     $supportedOS = $null
     if (-not [string]::IsNullOrWhiteSpace($productName)) {
-        $supportedOS = ($productName -match '^Windows (10|11)\\b')
+        $supportedOS = Test-SupportedWindowsProductName -ProductName $productName
     }
 
     return [pscustomobject]@{
