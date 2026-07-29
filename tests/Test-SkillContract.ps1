@@ -72,6 +72,9 @@ $referenceContracts = @{
     'network-and-proxy.md' = @('DNS', 'TLS', 'HTTP', 'WebSocket', 'SSE', 'VPN', 'proxy credential')
     'security-and-privacy.md' = @('Defender', 'firewall', 'Windows Update', 'UAC', 'Windows 10 lifecycle')
     'interface-and-notifications.md' = @('security notification', 'update notification', 'background permission', 'user preference')
+    'apps-and-features.md' = @('official uninstall', 'dependency', 'shared component', 'optional feature')
+    'new-pc-onboarding.md' = @('recovery', 'backup', 'software source', 'storage layout', 'use case')
+    'backup-rollback-validation.md' = @('exact target', 'original state', 'execution context', 'rollback', 'fresh evidence')
 }
 $referenceSections = @('## Read first', '## Evidence', '## Candidate classes', '## Preserve', '## Risk upgrades', '## Validation', '## Stop')
 
