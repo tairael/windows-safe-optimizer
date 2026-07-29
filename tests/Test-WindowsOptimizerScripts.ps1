@@ -6,6 +6,7 @@ Set-StrictMode -Version Latest
 
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $scriptPath = Join-Path $repositoryRoot 'skills\windows-safe-optimizer\scripts\Test-WindowsOptimizerEnvironment.ps1'
+$collectorPath = Join-Path $repositoryRoot 'skills\windows-safe-optimizer\scripts\Collect-WindowsBaseline.ps1'
 
 function Invoke-EnvironmentScript {
     param([Parameter(Mandatory = $true)][string]$OutputDirectory)
@@ -21,6 +22,53 @@ function Invoke-EnvironmentScript {
     }
 
     return [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+}
+
+function Invoke-BaselineCollector {
+    param(
+        [Parameter(Mandatory = $true)][string]$OutputDirectory,
+        [Parameter(Mandatory = $true)][string[]]$Sections
+    )
+
+    $previousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if (($Sections -join ',') -eq 'System,Storage,Memory') {
+            $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $collectorPath -OutputDirectory $OutputDirectory -Sections System,Storage,Memory -SampleCount 1 -SampleIntervalSeconds 1 2>&1)
+        }
+        elseif (($Sections -join ',') -eq 'System,Storage,Memory,Startup,Security,Network') {
+            $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $collectorPath -OutputDirectory $OutputDirectory -Sections System,Storage,Memory,Startup,Security,Network -SampleCount 1 -SampleIntervalSeconds 1 2>&1)
+        }
+        else {
+            throw 'Baseline collector test must use an explicit supported section set.'
+        }
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    return [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+}
+
+function Assert-CaseInsensitiveNotContains {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [AllowNull()][string]$Value,
+        [Parameter(Mandatory = $true)][string]$Message
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        Assert-True ($Text.IndexOf($Value, [StringComparison]::OrdinalIgnoreCase) -lt 0) $Message
+    }
+}
+
+function Assert-BaselineOutputContainsOnlyReports {
+    param([Parameter(Mandatory = $true)][string]$OutputDirectory)
+
+    $children = @(Get-ChildItem -LiteralPath $OutputDirectory -Force)
+    Assert-Equal 2 $children.Count 'Baseline collector created an unexpected number of output files'
+    Assert-Equal 'baseline.json|baseline.md' (@($children.Name | Sort-Object) -join '|') 'Baseline collector wrote unexpected files'
 }
 
 function Get-PathSnapshot {
@@ -81,6 +129,7 @@ function Get-CaseAndTrailingSeparatorVariant {
 }
 
 Assert-True (Test-Path -LiteralPath $scriptPath) 'Environment script is missing'
+Assert-True (Test-Path -LiteralPath $collectorPath) 'Baseline collector is missing'
 
 $temporaryParentGuard = Initialize-TestRunnerTemporaryParent -RepositoryRoot $repositoryRoot
 $sandbox = $null
@@ -112,6 +161,55 @@ try {
     Assert-Equal $false ([bool]$result.outputDirectoryIsReparsePoint) 'Normal output directory was reported as a reparse point'
     foreach ($field in @('productName', 'displayVersion', 'buildNumber', 'powerShellVersion', 'isAdministrator', 'warnings')) {
         Assert-True ($result.PSObject.Properties.Name -contains $field) "Environment field is missing: $field"
+    }
+
+    $baselineOutput = Join-Path $sandbox.Path 'baseline-output'
+    New-Item -ItemType Directory -Path $baselineOutput | Out-Null
+    $fastInvocation = Invoke-BaselineCollector -OutputDirectory $baselineOutput -Sections @('System', 'Storage', 'Memory')
+    Assert-Equal 0 $fastInvocation.ExitCode "Three-section baseline collection failed: $($fastInvocation.Output | Out-String)"
+    $baselineJsonPath = Join-Path $baselineOutput 'baseline.json'
+    $baselineMarkdownPath = Join-Path $baselineOutput 'baseline.md'
+    Assert-True (Test-Path -LiteralPath $baselineJsonPath -PathType Leaf) 'baseline.json missing'
+    Assert-True (Test-Path -LiteralPath $baselineMarkdownPath -PathType Leaf) 'baseline.md missing'
+    Assert-BaselineOutputContainsOnlyReports -OutputDirectory $baselineOutput
+
+    $baselineJson = Get-Content -Raw -LiteralPath $baselineJsonPath
+    $baseline = $baselineJson | ConvertFrom-Json
+    Assert-Equal '1.0' $baseline.schemaVersion 'Unexpected baseline schema'
+    foreach ($field in @('generatedAt', 'collectionContext', 'system', 'storage', 'memory', 'startup', 'security', 'network', 'warnings')) {
+        Assert-True ($baseline.PSObject.Properties.Name -contains $field) "Baseline top-level field is missing: $field"
+    }
+    foreach ($section in @('system', 'storage', 'memory')) {
+        Assert-True ($null -ne $baseline.$section) "Fast baseline section is missing: $section"
+    }
+    Assert-CaseInsensitiveNotContains -Text $baselineJson -Value $env:USERNAME -Message 'Raw username leaked from baseline JSON'
+    Assert-CaseInsensitiveNotContains -Text $baselineJson -Value $env:USERPROFILE -Message 'Raw profile path leaked from baseline JSON'
+    Assert-True ($baselineJson -notmatch '(?i)\bS-\d-\d+(?:-\d+){1,}\b') 'SID-shaped value leaked from baseline JSON'
+    $baselineMarkdown = Get-Content -Raw -LiteralPath $baselineMarkdownPath
+    Assert-True ($baselineMarkdown.Contains([string]$baseline.generatedAt)) 'Markdown was not generated from the finalized baseline object'
+    Assert-CaseInsensitiveNotContains -Text $baselineMarkdown -Value $env:USERNAME -Message 'Raw username leaked from baseline Markdown'
+    Assert-CaseInsensitiveNotContains -Text $baselineMarkdown -Value $env:USERPROFILE -Message 'Raw profile path leaked from baseline Markdown'
+    Assert-True ($baselineMarkdown -notmatch '(?i)\bS-\d-\d+(?:-\d+){1,}\b') 'SID-shaped value leaked from baseline Markdown'
+
+    $allSectionsInvocation = Invoke-BaselineCollector -OutputDirectory $baselineOutput -Sections @('System', 'Storage', 'Memory', 'Startup', 'Security', 'Network')
+    Assert-Equal 0 $allSectionsInvocation.ExitCode "All-section baseline collection failed: $($allSectionsInvocation.Output | Out-String)"
+    Assert-BaselineOutputContainsOnlyReports -OutputDirectory $baselineOutput
+    $allBaseline = (Get-Content -Raw -LiteralPath $baselineJsonPath) | ConvertFrom-Json
+    foreach ($section in @('system', 'storage', 'memory', 'startup', 'security', 'network')) {
+        Assert-True ($null -ne $allBaseline.$section) "All-section baseline is missing: $section"
+    }
+    Assert-Equal $false $allBaseline.collectionContext.isAdministrator 'All-section baseline did not run as a non-administrator process'
+    foreach ($warning in @($allBaseline.warnings)) {
+        foreach ($property in @('section', 'code', 'message')) {
+            Assert-True ($warning.PSObject.Properties.Name -contains $property) "Baseline warning is not structured: $property"
+        }
+    }
+
+    foreach ($bundledScript in @($scriptPath, $collectorPath)) {
+        $scriptText = Get-Content -Raw -LiteralPath $bundledScript
+        foreach ($forbiddenToken in @('Remove-Item', 'Move-Item', 'Set-ItemProperty', 'New-ItemProperty', 'Stop-Service', 'Set-Service', 'Disable-ScheduledTask', 'Start-Process\s+-Verb\s+RunAs', 'reg\s+add', 'schtasks\s+/change')) {
+            Assert-True ($scriptText -notmatch "(?i)$forbiddenToken") "Bundled script contains prohibited mutation token '$forbiddenToken': $bundledScript"
+        }
     }
 
     Assert-OutputDirectoryRejectedWithoutMutation -Path ([IO.Path]::GetPathRoot($testOutput).ToLowerInvariant()) -Description 'volume root with case variation'
