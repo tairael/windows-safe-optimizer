@@ -102,7 +102,7 @@ function Get-ScriptAstSafetyViolations {
         'Open-NewBaselineReport', 'Pop-Location', 'Push-Location', 'Resolve-SafeOutputDirectory',
         'Resolve-ValidatedOutputDirectory', 'Select-Object', 'Set-StrictMode', 'Split-Path', 'Start-Sleep',
         'Test-Path', 'Test-SamePath', 'Test-SamePathOrChildPath', 'Test-SupportedWindowsProductName',
-        'Test-WindowsOptimizerEnvironment.ps1', 'Where-Object', 'Write-BaselineReportsToHandles',
+        'Where-Object', 'Write-BaselineReportsToHandles',
         'Write-TextToBaselineReportStream'
     )
     foreach ($command in @($Ast.FindAll({ param($node) $node -is [Management.Automation.Language.CommandAst] }, $true))) {
@@ -514,7 +514,9 @@ try {
             [pscustomobject]@{ Source = "[IO.File]::WriteAllText('probe','content')"; Description = '.NET path write' },
             [pscustomobject]@{ Source = '& C:\evil\Test-WindowsOptimizerEnvironment.ps1'; Description = 'absolute path to allowlisted script name' },
             [pscustomobject]@{ Source = '& C:\evil\Collect-WindowsBaseline.ps1'; Description = 'absolute path to unused allowlisted script name' },
-            [pscustomobject]@{ Source = 'Contoso.Module\Get-CimInstance -ClassName Win32_OperatingSystem'; Description = 'unapproved module-qualified allowlisted command' }
+            [pscustomobject]@{ Source = 'Contoso.Module\Get-CimInstance -ClassName Win32_OperatingSystem'; Description = 'unapproved module-qualified allowlisted command' },
+            [pscustomobject]@{ Source = 'Test-WindowsOptimizerEnvironment.ps1 -OutputDirectory C:\probe'; Description = 'unqualified environment script call at top level' },
+            [pscustomobject]@{ Source = 'function Invoke-Probe { Test-WindowsOptimizerEnvironment.ps1 -OutputDirectory C:\probe }'; Description = 'unqualified environment script call inside an arbitrary function' }
         )) {
         Assert-AstSafetyProbeRejected -Source $astProbe.Source -Description $astProbe.Description
     }
