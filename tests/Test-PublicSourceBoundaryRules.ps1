@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
 . (Join-Path $PSScriptRoot 'PublicSourceBoundaryHelpers.ps1')
