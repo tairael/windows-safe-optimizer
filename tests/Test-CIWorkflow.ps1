@@ -19,6 +19,8 @@ permissions:
 jobs:
   validate:
     runs-on: windows-latest
+    env:
+      WINDOWS_SAFE_OPTIMIZER_CI_ELEVATED: '1'
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

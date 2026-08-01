@@ -395,7 +395,12 @@ try {
         Assert-True ($null -ne $allBaseline.$section) "All-section baseline is missing: $section"
     }
     if ($allBaseline.collectionContext.isAdministrator -ne $false) {
-        throw 'NON-ADMIN VERIFICATION UNAVAILABLE: the current test process is elevated; no scheduled task, UAC prompt, or unsafe restricted-token workaround is used.'
+        $isDeclaredHostedCi = $env:GITHUB_ACTIONS -eq 'true' -and
+            $env:WINDOWS_SAFE_OPTIMIZER_CI_ELEVATED -eq '1'
+        if (-not $isDeclaredHostedCi) {
+            throw 'NON-ADMIN VERIFICATION UNAVAILABLE: the current test process is elevated; no scheduled task, UAC prompt, or unsafe restricted-token workaround is used.'
+        }
+        'NON-ADMIN VERIFICATION DEFERRED: GitHub-hosted Windows runners are elevated; release evidence must include a separate non-admin run.'
     }
     foreach ($warning in @($allBaseline.warnings)) {
         foreach ($property in @('section', 'code', 'message')) {
