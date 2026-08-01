@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520" role="img" aria-labelledby="banner-title banner-desc">
+  <title id="banner-title">Windows Safe Optimizer</title>
+  <desc id="banner-desc">Blue-to-violet Windows panes surrounded by a diagnostic pulse, storage arc, and safety shield.</desc>
+  <defs>
+    <linearGradient id="background-gradient" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#071B43"/>
+      <stop offset="0.48" stop-color="#174EA6"/>
+      <stop offset="1" stop-color="#6D38D1"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="520" rx="36" fill="url(#background-gradient)"/>
+
+  <g fill="none" stroke="#BFD7FF" stroke-width="1" opacity="0.13">
+    <path d="M0 86H1600M0 172H1600M0 258H1600M0 344H1600M0 430H1600"/>
+    <path d="M100 0V520M200 0V520M300 0V520M400 0V520M500 0V520M600 0V520M700 0V520M800 0V520M900 0V520M1000 0V520M1100 0V520M1200 0V520M1300 0V520M1400 0V520M1500 0V520"/>
+  </g>
+
+  <g transform="translate(104 118)">
+    <path d="M0 142H72L92 106L122 196L154 80L184 142H282" fill="none" stroke="#7DE3FF" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="282" cy="142" r="11" fill="#E6F7FF"/>
+    <path d="M30 246A124 124 0 0 1 250 246" fill="none" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round" opacity="0.88"/>
+    <path d="M30 246A124 124 0 0 1 178 132" fill="none" stroke="#8EE6FF" stroke-width="14" stroke-linecap="round"/>
+    <circle cx="140" cy="246" r="7" fill="#FFFFFF" opacity="0.7"/>
+  </g>
+
+  <g transform="translate(520 112)" fill="#FFFFFF">
+    <path d="M0 0L208 28V144H0Z" opacity="0.98"/>
+    <path d="M230 31L438 59V144H230Z" opacity="0.82"/>
+    <path d="M0 166H208V282L0 310Z" opacity="0.82"/>
+    <path d="M230 166H438V251L230 279Z" opacity="0.98"/>
+  </g>
+
+  <g transform="translate(1118 92)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M138 0L254 44V134C254 220 207 286 138 322C69 286 22 220 22 134V44Z" stroke="#FFFFFF" stroke-width="13" opacity="0.96"/>
+    <path d="M82 151L122 190L202 105" stroke="#83F0D3" stroke-width="16"/>
+    <circle cx="138" cy="134" r="92" stroke="#C9D8FF" stroke-width="2" stroke-dasharray="8 14" opacity="0.55"/>
+  </g>
+
+  <text x="520" y="64" fill="#FFFFFF" font-size="48" font-weight="700" letter-spacing="1">Windows Safe Optimizer</text>
+  <text x="522" y="100" fill="#E6ECFF" font-size="22">Measure · Decide · Recover · Verify</text>
+</svg>
