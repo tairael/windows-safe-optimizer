@@ -86,4 +86,8 @@ Assert-PublicTrackedEntriesAllowed -Entries @(
     [pscustomobject]@{ Path = 'scripts/check.ps1'; Mode = '100755' }
 )
 
+$boundaryTest = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'Test-PublicSourceBoundary.ps1')
+Assert-True (-not $boundaryTest.Contains("Assert-Equal '03-源文件'")) 'Public boundary test must not depend on the internal workspace parent directory'
+Assert-True (-not $boundaryTest.Contains('branch --show-current')) 'Public boundary test must run on pull-request and detached checkouts'
+
 "PUBLIC SOURCE NEGATIVE MATRIX PASSED: $($blockedCases.Count) blocked patterns checked through 2 scan paths; reparse, symlink, and gitlink probes rejected"
