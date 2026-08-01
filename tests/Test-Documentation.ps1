@@ -21,10 +21,10 @@ foreach ($relativePath in $requiredFiles) {
     Assert-True (Test-Path -LiteralPath $fullPath -PathType Leaf) "Missing documentation file: $relativePath"
 }
 
-$readme = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.md') -Raw
-$englishReadme = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.en.md') -Raw
-$sampleReport = Get-Content -LiteralPath (Join-Path $repositoryRoot 'examples/sample-report.md') -Raw
-$banner = Get-Content -LiteralPath (Join-Path $repositoryRoot 'assets/banner.svg') -Raw
+$readme = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.md') -Raw -Encoding UTF8
+$englishReadme = Get-Content -LiteralPath (Join-Path $repositoryRoot 'README.en.md') -Raw -Encoding UTF8
+$sampleReport = Get-Content -LiteralPath (Join-Path $repositoryRoot 'examples/sample-report.md') -Raw -Encoding UTF8
+$banner = Get-Content -LiteralPath (Join-Path $repositoryRoot 'assets/banner.svg') -Raw -Encoding UTF8
 
 $requiredHeadings = @(
     '它解决什么问题',
@@ -60,7 +60,7 @@ Assert-True ($englishReadme.Contains($installCommand)) 'English README install c
 
 $publicMarkdown = Get-ChildItem -LiteralPath $repositoryRoot -Recurse -File -Filter '*.md'
 foreach ($markdownFile in $publicMarkdown) {
-    $content = Get-Content -LiteralPath $markdownFile.FullName -Raw
+    $content = Get-Content -LiteralPath $markdownFile.FullName -Raw -Encoding UTF8
 
     foreach ($match in [regex]::Matches($content, '(?i)windows-safe-optimizer')) {
         Assert-Equal 'windows-safe-optimizer' $match.Value "Inconsistent package-name casing in $($markdownFile.FullName)"

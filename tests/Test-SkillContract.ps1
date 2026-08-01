@@ -6,8 +6,8 @@ Set-StrictMode -Version Latest
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $skillPath = Join-Path $repositoryRoot 'skills\windows-safe-optimizer\SKILL.md'
 $agentPath = Join-Path $repositoryRoot 'skills\windows-safe-optimizer\agents\openai.yaml'
-$skill = Get-Content -Raw -LiteralPath $skillPath
-$agent = Get-Content -Raw -LiteralPath $agentPath
+$skill = Get-Content -Raw -LiteralPath $skillPath -Encoding UTF8
+$agent = Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8
 
 Assert-True ($skill -match '(?ms)^---\s+name:\s+windows-safe-optimizer\s+description:\s+Use when[^\r\n]+\s+---') 'Frontmatter trigger is invalid or description is not a plain string beginning with Use when'
 
@@ -165,7 +165,7 @@ Assert-True (-not $fencedTokenBody.Contains('logical size')) 'Token checks must 
 foreach ($referenceFile in $referenceContracts.Keys) {
     $referencePath = Join-Path $repositoryRoot "skills\windows-safe-optimizer\references\$referenceFile"
     Assert-True (Test-Path -LiteralPath $referencePath -PathType Leaf) "Missing reference: $referenceFile"
-    $reference = Get-Content -Raw -LiteralPath $referencePath
+    $reference = Get-Content -Raw -LiteralPath $referencePath -Encoding UTF8
     $referenceBody = Remove-MarkdownFencedCodeBlocks -Content $reference
     Assert-True (Test-ReferenceSectionContract -Content $reference) "Reference sections must appear exactly once and in order: $referenceFile"
     foreach ($token in $referenceContracts[$referenceFile]) {
