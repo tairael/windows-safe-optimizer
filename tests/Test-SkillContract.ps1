@@ -39,8 +39,20 @@ $operationCardEnd = $skill.IndexOf('## Module routing', [System.StringComparison
 Assert-True (($operationCardStart -ge 0) -and ($operationCardEnd -gt $operationCardStart)) 'Operation-card section boundaries are invalid'
 $operationCard = $skill.Substring($operationCardStart, $operationCardEnd - $operationCardStart)
 
-foreach ($field in @('Finding', 'Evidence', 'Expected gain', 'Feature impact', 'Risk', 'Action', 'Backup', 'Rollback', 'Validation', 'Stop condition')) {
+foreach ($field in @('Finding', 'Evidence', 'Expected gain', 'Feature impact', 'Risk', 'Action', 'Backup', 'Rollback', 'Validation', 'Privacy', 'Stop condition')) {
     Assert-True ($operationCard.Contains("| $field |")) "Missing operation-card field in operation-card section: $field"
+}
+foreach ($contract in @(
+    'A refusal, safety stop, unselected mode, or advice-only block is still a candidate outcome',
+    '`Not performed`',
+    '`Not applicable — no change`',
+    'missing platform or ownership fact',
+    'exact object that would need naming',
+    'why execution is stopped',
+    'nearest safe next step',
+    'or explicitly says that none was performed'
+)) {
+    Assert-True ($operationCard.Contains($contract)) "Missing blocked-outcome operation-card contract: $contract"
 }
 
 $routingStart = $skill.IndexOf('## Module routing', [System.StringComparison]::Ordinal)

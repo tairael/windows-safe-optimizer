@@ -62,7 +62,7 @@ Use these scenario controls whenever they apply:
 
 ## Operation card
 
-Output one table per candidate. Fill every field; use `Unknown — verify before action` rather than omitting evidence. The Action row includes the exact object identity, proposed command or manual settings path, execution user, and required privileges.
+Output one table per candidate. A refusal, safety stop, unselected mode, or advice-only block is still a candidate outcome and uses the same complete card. Fill every field; use `Unknown — verify before action`, `Not performed`, or `Not applicable — no change` rather than omitting a field. For a blocked action, state the missing platform or ownership fact, the exact object that would need naming, why execution is stopped, and the nearest safe next step. The Action row includes the exact object identity, proposed command or manual settings path, execution user, and required privileges, or explicitly says that none was performed.
 
 | Field | Required content |
 |---|---|
@@ -75,6 +75,7 @@ Output one table per candidate. Fill every field; use `Unknown — verify before
 | Backup | Original state plus a verified, user-accessible backup location or `Not applicable` |
 | Rollback | Exact restoration steps, prerequisites, and fallback if restoration fails |
 | Validation | Before/after metric and functional checks under comparable conditions |
+| Privacy | Minimum necessary data, sensitive fields or paths to exclude/redact, and whether network access or telemetry is involved |
 | Stop condition | The success, regression, uncertainty, or diminishing-return condition that ends work |
 
 ## Module routing
